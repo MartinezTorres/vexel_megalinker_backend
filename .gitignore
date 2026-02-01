@@ -1,0 +1,38 @@
+# Build directories
+build/
+bin/
+
+# External
+ext/
+
+# Generated C files
+*.c
+!examples/*.c
+out.h
+
+# Object files and binaries
+*.o
+*.out
+a.out
+
+# Executables
+example
+test_*
+
+# Temporary files
+*_main.c
+summary*.md
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Agentic artifacts (kept out of version control)
+AUDIT.md
+Assistant.md
+
+# Web build artifacts (embedded into playground.html)
+playground/vexel.js
+playground/vexel.wasm
