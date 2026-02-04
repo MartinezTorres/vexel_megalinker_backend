@@ -18,6 +18,7 @@ static void print_usage(const char* prog) {
     std::cout << "  -L           Emit lowered Vexel subset alongside backend output\n";
     std::cout << "  --emit-analysis Emit analysis report alongside backend output\n";
     std::cout << "  --allow-process Enable process expressions (executes host commands; disabled by default)\n";
+    std::cout << "  --backend-opt <k=v> Backend-specific option (repeatable)\n";
     std::cout << "  -v           Verbose output\n";
     std::cout << "  -h           Show this help\n";
 }
@@ -41,6 +42,24 @@ int main(int argc, char** argv) {
             opts.emit_analysis = true;
         } else if (std::strcmp(argv[i], "--allow-process") == 0) {
             opts.allow_process = true;
+        } else if (std::strcmp(argv[i], "--backend-opt") == 0 || std::strncmp(argv[i], "--backend-opt=", 14) == 0) {
+            const char* opt = nullptr;
+            if (std::strncmp(argv[i], "--backend-opt=", 14) == 0) {
+                opt = argv[i] + 14;
+            } else if (i + 1 < argc) {
+                opt = argv[++i];
+            } else {
+                std::cerr << "Error: --backend-opt requires an argument\n";
+                return 1;
+            }
+            const char* eq = std::strchr(opt, '=');
+            if (!eq || eq == opt || *(eq + 1) == '\0') {
+                std::cerr << "Error: --backend-opt expects key=value\n";
+                return 1;
+            }
+            std::string key(opt, eq - opt);
+            std::string value(eq + 1);
+            opts.backend_options[key] = value;
         } else if (std::strcmp(argv[i], "-o") == 0) {
             if (i + 1 < argc) {
                 opts.output_file = argv[++i];

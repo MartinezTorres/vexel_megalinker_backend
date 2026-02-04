@@ -3,15 +3,19 @@
 #include "codegen.h"
 #include "constants.h"
 #include "function_key.h"
+#include "evaluator.h"
+#include "common.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
-#include <functional>
 #include <fstream>
 #include <iostream>
 #include <queue>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace vexel {
 
@@ -37,187 +41,593 @@ static std::string qualified_name(const StmtPtr& stmt) {
     return stmt->func_name;
 }
 
-static std::string function_key(const StmtPtr& stmt) {
-    return reachability_key(qualified_name(stmt), stmt ? stmt->scope_instance_id : -1);
+static std::string symbol_key(const std::string& name, int scope_id) {
+    if (scope_id >= 0) {
+        return name + "#" + std::to_string(scope_id);
+    }
+    return name;
 }
 
-static std::string build_return_type(CodeGenerator& codegen, StmtPtr func) {
-    if (!func) return "void";
-    if (!func->return_types.empty()) {
-        std::string tuple_name = std::string(TUPLE_TYPE_PREFIX) + std::to_string(func->return_types.size());
-        for (const auto& t : func->return_types) {
-            tuple_name += "_";
-            if (t) {
-                tuple_name += t->to_string();
+static std::string sanitize_tag(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    for (unsigned char c : input) {
+        if (std::isalnum(c) || c == '_') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) out = "v";
+    return out;
+}
+
+static std::string strip_static(const std::string& input) {
+    std::string out = input;
+    for (;;) {
+        size_t pos = out.find("static ");
+        if (pos == std::string::npos) break;
+        out.erase(pos, 7);
+    }
+    return out;
+}
+
+static std::string replace_identifier_token(const std::string& input,
+                                            const std::string& from,
+                                            const std::string& to) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size();) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+        if (std::isalnum(c) || c == '_') {
+            size_t j = i;
+            while (j < input.size()) {
+                unsigned char d = static_cast<unsigned char>(input[j]);
+                if (!std::isalnum(d) && d != '_') break;
+                j++;
+            }
+            std::string token = input.substr(i, j - i);
+            if (token == from) {
+                out += to;
             } else {
-                tuple_name += "unknown";
+                out += token;
             }
+            i = j;
+        } else {
+            out.push_back(input[i]);
+            i++;
         }
-        return codegen.mangle(tuple_name);
     }
-    if (func->return_type) {
-        return codegen.type_to_c(func->return_type);
-    }
-    return "void";
+    return out;
 }
 
-static std::string build_param_list(CodeGenerator& codegen, StmtPtr func, bool with_types) {
-    if (!func) return "";
+static std::string build_arg_list_from_proto(const std::string& proto) {
+    size_t lparen = proto.find('(');
+    size_t rparen = proto.rfind(')');
+    if (lparen == std::string::npos || rparen == std::string::npos || rparen <= lparen) {
+        return "";
+    }
+    std::string params = proto.substr(lparen + 1, rparen - lparen - 1);
+    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    while (!params.empty() && is_space(static_cast<unsigned char>(params.front()))) params.erase(params.begin());
+    while (!params.empty() && is_space(static_cast<unsigned char>(params.back()))) params.pop_back();
+    if (params.empty() || params == "void") return "";
+
+    std::vector<std::string> names;
+    size_t start = 0;
+    while (start < params.size()) {
+        size_t comma = params.find(',', start);
+        std::string part = (comma == std::string::npos) ? params.substr(start) : params.substr(start, comma - start);
+        start = (comma == std::string::npos) ? params.size() : comma + 1;
+
+        // trim
+        size_t p0 = part.find_first_not_of(" \t\r\n");
+        size_t p1 = part.find_last_not_of(" \t\r\n");
+        if (p0 == std::string::npos) continue;
+        part = part.substr(p0, p1 - p0 + 1);
+
+        // find last identifier token
+        size_t i = part.size();
+        while (i > 0 && !(std::isalnum(static_cast<unsigned char>(part[i - 1])) || part[i - 1] == '_')) i--;
+        size_t end = i;
+        while (i > 0 && (std::isalnum(static_cast<unsigned char>(part[i - 1])) || part[i - 1] == '_')) i--;
+        if (end > i) {
+            names.push_back(part.substr(i, end - i));
+        }
+    }
+
     std::ostringstream oss;
-    bool first = true;
-
-    for (size_t i = 0; i < func->ref_params.size(); ++i) {
-        if (!first) oss << ", ";
-        first = false;
-        std::string name = codegen.mangle(func->ref_params[i]);
-        if (with_types) {
-            std::string ref_type = "void*";
-            if (!func->type_namespace.empty() && i == 0) {
-                ref_type = codegen.mangle(func->type_namespace) + "*";
-            }
-            oss << ref_type << " " << name;
-        } else {
-            oss << name;
-        }
-    }
-
-    for (const auto& param : func->params) {
-        if (param.is_expression_param) continue;
-        if (!first) oss << ", ";
-        first = false;
-        std::string name = codegen.mangle(param.name);
-        if (with_types) {
-            std::string type = param.type ? codegen.type_to_c(param.type) : "int";
-            oss << type << " " << name;
-        } else {
-            oss << name;
-        }
-    }
-
-    if (first && with_types) {
-        oss << "void";
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << names[i];
     }
     return oss.str();
 }
 
-static std::string build_arg_list(CodeGenerator& codegen, StmtPtr func) {
-    return build_param_list(codegen, func, false);
+static std::string trim_copy(const std::string& input) {
+    size_t start = input.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = input.find_last_not_of(" \t\r\n");
+    return input.substr(start, end - start + 1);
 }
 
-static void collect_calls(ExprPtr expr, std::unordered_set<std::string>& calls) {
+static bool find_identifier_token(const std::string& input,
+                                  const std::string& token,
+                                  size_t& out_start,
+                                  size_t& out_end) {
+    for (size_t i = 0; i < input.size();) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+        if (std::isalnum(c) || c == '_') {
+            size_t j = i;
+            while (j < input.size()) {
+                unsigned char d = static_cast<unsigned char>(input[j]);
+                if (!std::isalnum(d) && d != '_') break;
+                j++;
+            }
+            if (input.compare(i, j - i, token) == 0) {
+                out_start = i;
+                out_end = j;
+                return true;
+            }
+            i = j;
+        } else {
+            i++;
+        }
+    }
+    return false;
+}
+
+static std::string extract_return_type(const std::string& proto, const std::string& func_name) {
+    size_t start = 0;
+    size_t end = 0;
+    if (!find_identifier_token(proto, func_name, start, end)) {
+        return "";
+    }
+    return trim_copy(proto.substr(0, start));
+}
+
+static bool is_pointer_like(TypePtr type) {
+    if (!type) return false;
+    if (type->kind == Type::Kind::Array) return true;
+    if (type->kind == Type::Kind::Primitive && type->primitive == PrimitiveType::String) return true;
+    return false;
+}
+
+static bool is_addressable_lvalue(ExprPtr expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case Expr::Kind::Identifier:
+            return true;
+        case Expr::Kind::Member:
+        case Expr::Kind::Index:
+            return is_addressable_lvalue(expr->operand);
+        default:
+            return false;
+    }
+}
+
+static bool is_mutable_lvalue(ExprPtr expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case Expr::Kind::Identifier:
+            return expr->is_mutable_binding;
+        case Expr::Kind::Member:
+        case Expr::Kind::Index:
+            return is_mutable_lvalue(expr->operand);
+        default:
+            return false;
+    }
+}
+
+static std::string ref_variant_key(ExprPtr call, size_t ref_count) {
+    std::string key;
+    key.reserve(ref_count);
+    for (size_t i = 0; i < ref_count; ++i) {
+        bool is_mut = false;
+        if (call && i < call->receivers.size()) {
+            is_mut = is_addressable_lvalue(call->receivers[i]) && is_mutable_lvalue(call->receivers[i]);
+        }
+        key.push_back(is_mut ? 'M' : 'N');
+    }
+    return key;
+}
+
+static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
     if (!expr) return;
+    if (expr->kind == Expr::Kind::Call) {
+        calls.push_back(expr);
+    }
 
     switch (expr->kind) {
         case Expr::Kind::Call:
-            if (expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
-                calls.insert(reachability_key(expr->operand->name, expr->operand->scope_instance_id));
-            }
-            for (const auto& rec : expr->receivers) {
-                collect_calls(rec, calls);
-            }
-            for (const auto& arg : expr->args) {
-                collect_calls(arg, calls);
-            }
-            collect_calls(expr->operand, calls);
+            for (const auto& rec : expr->receivers) collect_call_exprs(rec, calls);
+            for (const auto& arg : expr->args) collect_call_exprs(arg, calls);
+            collect_call_exprs(expr->operand, calls);
             break;
-
         case Expr::Kind::Binary:
-            collect_calls(expr->left, calls);
-            collect_calls(expr->right, calls);
+            collect_call_exprs(expr->left, calls);
+            collect_call_exprs(expr->right, calls);
             break;
-
         case Expr::Kind::Unary:
-            collect_calls(expr->operand, calls);
+            collect_call_exprs(expr->operand, calls);
             break;
-
         case Expr::Kind::Index:
-            collect_calls(expr->left, calls);
-            collect_calls(expr->right, calls);
+            collect_call_exprs(expr->left, calls);
+            collect_call_exprs(expr->right, calls);
             break;
-
         case Expr::Kind::Member:
-            collect_calls(expr->operand, calls);
+            collect_call_exprs(expr->operand, calls);
             break;
-
         case Expr::Kind::ArrayLiteral:
         case Expr::Kind::TupleLiteral:
-            for (const auto& elem : expr->elements) {
-                collect_calls(elem, calls);
-            }
+            for (const auto& elem : expr->elements) collect_call_exprs(elem, calls);
             break;
-
         case Expr::Kind::Block:
             for (const auto& st : expr->statements) {
                 if (!st) continue;
-                if (st->expr) collect_calls(st->expr, calls);
-                if (st->return_expr) collect_calls(st->return_expr, calls);
+                if (st->expr) collect_call_exprs(st->expr, calls);
+                if (st->return_expr) collect_call_exprs(st->return_expr, calls);
             }
-            collect_calls(expr->result_expr, calls);
+            collect_call_exprs(expr->result_expr, calls);
             break;
-
         case Expr::Kind::Conditional:
-            collect_calls(expr->condition, calls);
-            collect_calls(expr->true_expr, calls);
-            collect_calls(expr->false_expr, calls);
+            collect_call_exprs(expr->condition, calls);
+            collect_call_exprs(expr->true_expr, calls);
+            collect_call_exprs(expr->false_expr, calls);
             break;
-
         case Expr::Kind::Cast:
-            collect_calls(expr->operand, calls);
+            collect_call_exprs(expr->operand, calls);
             break;
-
         case Expr::Kind::Assignment:
-            collect_calls(expr->left, calls);
-            collect_calls(expr->right, calls);
+            collect_call_exprs(expr->left, calls);
+            collect_call_exprs(expr->right, calls);
             break;
-
         case Expr::Kind::Range:
-            collect_calls(expr->left, calls);
-            collect_calls(expr->right, calls);
+            collect_call_exprs(expr->left, calls);
+            collect_call_exprs(expr->right, calls);
             break;
-
         case Expr::Kind::Length:
-            collect_calls(expr->operand, calls);
+            collect_call_exprs(expr->operand, calls);
             break;
-
         case Expr::Kind::Iteration:
         case Expr::Kind::Repeat:
-            collect_calls(expr->left, calls);
-            if (expr->right) collect_calls(expr->right, calls);
+            collect_call_exprs(expr->left, calls);
+            if (expr->right) collect_call_exprs(expr->right, calls);
             break;
-
         default:
             break;
     }
 }
 
-static bool has_variant(const AnalysisFacts& facts, const std::string& key, char variant) {
-    auto it = facts.reentrancy_variants.find(key);
-    if (it == facts.reentrancy_variants.end()) {
-        return variant == 'N';
+static std::string mutability_prefix(const AnalysisFacts& facts, StmtPtr stmt) {
+    auto it = facts.var_mutability.find(stmt.get());
+    VarMutability kind = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
+    if (it != facts.var_mutability.end()) {
+        kind = it->second;
     }
-    return it->second.count(variant) > 0;
+    switch (kind) {
+        case VarMutability::Mutable:
+            return "VX_MUTABLE ";
+        case VarMutability::NonMutableRuntime:
+            return "VX_NON_MUTABLE ";
+        case VarMutability::Constexpr:
+            return "VX_CONSTEXPR ";
+        default:
+            return "";
+    }
 }
 
-static bool info_is_reentrant_variant(const AnalysisFacts& facts,
-                                      const GeneratedFunctionInfo& info,
-                                      const std::string& func_key) {
-    auto it = facts.reentrancy_variants.find(func_key);
-    if (it == facts.reentrancy_variants.end() || it->second.size() <= 1) {
-        if (it != facts.reentrancy_variants.end()) {
-            return it->second.count('R') > 0 && it->second.count('N') == 0;
-        }
-        return false;
+static std::string array_size_str(TypeChecker& checker, TypePtr type, const SourceLocation& loc) {
+    if (!type || type->kind != Type::Kind::Array || !type->array_size) {
+        throw CompileError("Array size must be compile-time constant", loc);
     }
-    if (info.qualified_name.find("__reent") != std::string::npos) return true;
-    if (info.qualified_name.find("__nonreent") != std::string::npos) return false;
-    return false;
+    CompileTimeEvaluator evaluator(&checker);
+    CTValue size_val;
+    if (!evaluator.try_evaluate(type->array_size, size_val)) {
+        throw CompileError("Array size must be compile-time constant", loc);
+    }
+    if (std::holds_alternative<int64_t>(size_val)) {
+        return std::to_string(std::get<int64_t>(size_val));
+    }
+    if (std::holds_alternative<uint64_t>(size_val)) {
+        return std::to_string(std::get<uint64_t>(size_val));
+    }
+    throw CompileError("Array size must be an integer constant", loc);
+}
+
+struct GlobalInfo {
+    StmtPtr decl;
+    bool is_rom = false;
+    bool is_pointer_like = false;
+    std::string module_name;
+    std::string c_name;
+    int scope_id = -1;
+};
+
+static bool expr_uses_rom_symbol(ExprPtr expr,
+                                 const std::unordered_map<std::string, GlobalInfo>& globals,
+                                 TypeChecker& checker);
+
+static bool stmt_uses_rom_symbol(StmtPtr stmt,
+                                 const std::unordered_map<std::string, GlobalInfo>& globals,
+                                 TypeChecker& checker) {
+    if (!stmt) return false;
+    switch (stmt->kind) {
+        case Stmt::Kind::Expr:
+            return expr_uses_rom_symbol(stmt->expr, globals, checker);
+        case Stmt::Kind::Return:
+            return expr_uses_rom_symbol(stmt->return_expr, globals, checker);
+        case Stmt::Kind::VarDecl:
+            return expr_uses_rom_symbol(stmt->var_init, globals, checker);
+        case Stmt::Kind::ConditionalStmt:
+            if (expr_uses_rom_symbol(stmt->condition, globals, checker)) return true;
+            return stmt_uses_rom_symbol(stmt->true_stmt, globals, checker);
+        default:
+            return false;
+    }
+}
+
+static bool expr_uses_rom_symbol(ExprPtr expr,
+                                 const std::unordered_map<std::string, GlobalInfo>& globals,
+                                 TypeChecker& checker) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case Expr::Kind::Identifier: {
+            int scope_id = expr->scope_instance_id;
+            if (scope_id < 0) {
+                Symbol* sym = checker.get_scope()->lookup(expr->name);
+                if (sym && sym->scope_instance_id >= 0) {
+                    scope_id = sym->scope_instance_id;
+                }
+            }
+            std::string key = symbol_key(expr->name, scope_id);
+            auto it = globals.find(key);
+            return it != globals.end() && it->second.is_rom;
+        }
+        case Expr::Kind::Call:
+            for (const auto& rec : expr->receivers) {
+                if (expr_uses_rom_symbol(rec, globals, checker)) return true;
+            }
+            for (const auto& arg : expr->args) {
+                if (expr_uses_rom_symbol(arg, globals, checker)) return true;
+            }
+            if (expr->operand && expr->operand->kind != Expr::Kind::Identifier) {
+                return expr_uses_rom_symbol(expr->operand, globals, checker);
+            }
+            return false;
+        case Expr::Kind::Binary:
+            return expr_uses_rom_symbol(expr->left, globals, checker) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker);
+        case Expr::Kind::Unary:
+            return expr_uses_rom_symbol(expr->operand, globals, checker);
+        case Expr::Kind::Index:
+            return expr_uses_rom_symbol(expr->left, globals, checker) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker);
+        case Expr::Kind::Member:
+            return expr_uses_rom_symbol(expr->operand, globals, checker);
+        case Expr::Kind::ArrayLiteral:
+        case Expr::Kind::TupleLiteral:
+            for (const auto& elem : expr->elements) {
+                if (expr_uses_rom_symbol(elem, globals, checker)) return true;
+            }
+            return false;
+        case Expr::Kind::Block:
+            for (const auto& st : expr->statements) {
+                if (stmt_uses_rom_symbol(st, globals, checker)) return true;
+            }
+            return expr_uses_rom_symbol(expr->result_expr, globals, checker);
+        case Expr::Kind::Conditional:
+            return expr_uses_rom_symbol(expr->condition, globals, checker) ||
+                   expr_uses_rom_symbol(expr->true_expr, globals, checker) ||
+                   expr_uses_rom_symbol(expr->false_expr, globals, checker);
+        case Expr::Kind::Cast:
+            return expr_uses_rom_symbol(expr->operand, globals, checker);
+        case Expr::Kind::Assignment:
+            return expr_uses_rom_symbol(expr->left, globals, checker) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker);
+        case Expr::Kind::Range:
+            return expr_uses_rom_symbol(expr->left, globals, checker) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker);
+        case Expr::Kind::Length:
+            return expr_uses_rom_symbol(expr->operand, globals, checker);
+        case Expr::Kind::Iteration:
+        case Expr::Kind::Repeat:
+            return expr_uses_rom_symbol(expr->left, globals, checker) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker);
+        default:
+            return false;
+    }
+}
+
+struct Variant {
+    std::string id;
+    std::string func_key;
+    std::string signature_key;
+    std::string caller_id;
+    StmtPtr decl;
+    std::string ref_key;
+    char reent_key = 'N';
+    std::vector<PtrKind> param_kinds;
+    std::unordered_map<std::string, PtrKind> param_kind_by_name;
+    char page = 'A';
+    bool alters_caller_page = false;
+    bool needs_restore = false;
+    std::string name;
+    std::string c_name;
+    std::string module_name;
+    GeneratedFunctionInfo info;
+};
+
+static std::string segment_expr(char page, const std::string& module) {
+    std::string p(1, page);
+    return "((const uint8_t)&__ML_SEGMENT_" + p + "_" + module + ")";
+}
+
+static PtrKind infer_ptr_kind(ExprPtr expr,
+                              const Variant& variant,
+                              const std::unordered_map<std::string, GlobalInfo>& globals,
+                              TypeChecker& checker) {
+    if (!expr || !expr->type) return PtrKind::Ram;
+    if (!is_pointer_like(expr->type)) return PtrKind::Ram;
+
+    switch (expr->kind) {
+        case Expr::Kind::StringLiteral:
+        case Expr::Kind::ArrayLiteral:
+            return PtrKind::Far;
+        case Expr::Kind::Identifier: {
+            auto it = variant.param_kind_by_name.find(expr->name);
+            if (it != variant.param_kind_by_name.end()) {
+                return it->second;
+            }
+            int scope_id = expr->scope_instance_id;
+            if (scope_id < 0) {
+                Symbol* sym = checker.get_scope()->lookup(expr->name);
+                if (sym && sym->scope_instance_id >= 0) {
+                    scope_id = sym->scope_instance_id;
+                }
+            }
+            std::string key = symbol_key(expr->name, scope_id);
+            auto git = globals.find(key);
+            if (git != globals.end() && git->second.is_rom) {
+                return PtrKind::Far;
+            }
+            return PtrKind::Ram;
+        }
+        case Expr::Kind::Call:
+            return PtrKind::Far;
+        case Expr::Kind::Conditional: {
+            PtrKind a = infer_ptr_kind(expr->true_expr, variant, globals, checker);
+            PtrKind b = infer_ptr_kind(expr->false_expr, variant, globals, checker);
+            return (a == PtrKind::Far || b == PtrKind::Far) ? PtrKind::Far : PtrKind::Ram;
+        }
+        case Expr::Kind::Block:
+            return infer_ptr_kind(expr->result_expr, variant, globals, checker);
+        case Expr::Kind::Cast:
+            return infer_ptr_kind(expr->operand, variant, globals, checker);
+        case Expr::Kind::Member:
+            if (expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
+                int scope_id = expr->operand->scope_instance_id;
+                if (scope_id < 0) {
+                    Symbol* sym = checker.get_scope()->lookup(expr->operand->name);
+                    if (sym && sym->scope_instance_id >= 0) scope_id = sym->scope_instance_id;
+                }
+                std::string key = symbol_key(expr->operand->name, scope_id);
+                auto git = globals.find(key);
+                if (git != globals.end() && git->second.is_rom) {
+                    return PtrKind::Far;
+                }
+            }
+            return PtrKind::Ram;
+        default:
+            return PtrKind::Ram;
+    }
+}
+
+static std::vector<char> available_reent_keys(const AnalysisFacts& facts, const std::string& func_key) {
+    std::vector<char> keys;
+    auto it = facts.reentrancy_variants.find(func_key);
+    if (it != facts.reentrancy_variants.end()) {
+        keys.assign(it->second.begin(), it->second.end());
+    }
+    if (keys.empty()) keys.push_back('N');
+    std::sort(keys.begin(), keys.end());
+    return keys;
+}
+
+static std::string choose_ref_key(const AnalysisFacts& facts, const StmtPtr& decl, const std::string& desired) {
+    if (!decl) return desired;
+    std::string func_name = qualified_name(decl);
+    auto it = facts.ref_variants.find(func_name);
+    if (it == facts.ref_variants.end() || it->second.empty()) {
+        return desired.empty() ? std::string(decl->ref_params.size(), 'M') : desired;
+    }
+    if (it->second.count(desired)) return desired;
+    return std::string(decl->ref_params.size(), 'M');
+}
+
+static char choose_reent_key(const AnalysisFacts& facts, const std::string& func_key, char desired) {
+    auto it = facts.reentrancy_variants.find(func_key);
+    if (it == facts.reentrancy_variants.end() || it->second.empty()) {
+        return desired;
+    }
+    if (it->second.count(desired)) return desired;
+    return *(it->second.begin());
+}
+
+static std::string param_sig(const StmtPtr& decl, const std::vector<PtrKind>& kinds) {
+    if (!decl) return "";
+    std::string sig;
+    size_t kidx = 0;
+    for (const auto& param : decl->params) {
+        if (param.is_expression_param) continue;
+        if (is_pointer_like(param.type)) {
+            PtrKind k = (kidx < kinds.size()) ? kinds[kidx] : PtrKind::Ram;
+            sig.push_back(k == PtrKind::Far ? 'F' : 'R');
+        } else {
+            sig.push_back('-');
+        }
+        kidx++;
+    }
+    return sig;
+}
+
+static std::string signature_key(const std::string& func_key,
+                                 char reent_key,
+                                 const std::string& ref_key,
+                                 const std::string& pk) {
+    return func_key + "|r" + std::string(1, reent_key) + "|ref" + ref_key + "|pk" + pk;
+}
+
+static std::string trampoline_name(const StmtPtr& decl,
+                                   char reent_key,
+                                   const std::string& ref_key,
+                                   const std::string& pk) {
+    std::string name = qualified_name(decl) + "__tramp";
+    name += (reent_key == 'R') ? "__reent" : "__nonreent";
+    if (!ref_key.empty()) {
+        bool all_mut = std::all_of(ref_key.begin(), ref_key.end(), [](char c) { return c == 'M'; });
+        if (!all_mut) name += "__ref" + ref_key;
+    }
+    if (!pk.empty()) name += "__pk" + pk;
+    return name;
+}
+
+static size_t caller_limit_from_env() {
+    const char* env = std::getenv("VEXEL_MEGALINKER_CALLER_LIMIT");
+    if (!env || !*env) return 10;
+    char* end = nullptr;
+    long value = std::strtol(env, &end, 10);
+    if (!end || *end != '\0' || value <= 0) return 10;
+    return static_cast<size_t>(value);
+}
+
+static bool parse_caller_limit_option(const std::unordered_map<std::string, std::string>& opts,
+                                      size_t& out) {
+    auto it = opts.find("caller_limit");
+    if (it == opts.end()) {
+        it = opts.find("megalinker.caller_limit");
+    }
+    if (it == opts.end()) return false;
+    char* end = nullptr;
+    long value = std::strtol(it->second.c_str(), &end, 10);
+    if (!end || *end != '\0' || value <= 0) {
+        throw CompileError("Megalinker backend: caller_limit must be a positive integer", SourceLocation());
+    }
+    out = static_cast<size_t>(value);
+    return true;
 }
 
 } // namespace
 
 static void emit_megalinker_backend(const BackendContext& ctx) {
-    CodeGenerator codegen;
-    CCodegenResult result = codegen.generate(ctx.module, &ctx.checker, &ctx.analysis, &ctx.optimization);
+    // Build a header with types only (no function prototypes)
+    AnalysisFacts header_facts = ctx.analysis;
+    header_facts.reachable_functions.clear();
+
+    CodeGenerator header_codegen;
+    CodegenABI header_abi;
+    header_codegen.set_abi(header_abi);
+    CCodegenResult header_result = header_codegen.generate(ctx.module, &ctx.checker, &header_facts, &ctx.optimization);
 
     std::filesystem::path legacy_path = ctx.outputs.dir / (ctx.outputs.stem + ".c");
     if (std::filesystem::exists(legacy_path)) {
@@ -234,283 +644,623 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         std::cout << "Writing runtime: " << runtime_path << std::endl;
     }
 
-    std::ostringstream header_builder;
-    header_builder << result.header;
-    header_builder << "\nextern int __vexel_current_page;\n";
-    for (const auto& info : codegen.functions()) {
-        if (!info.declaration || !info.declaration->is_exported) continue;
-        std::string ret = build_return_type(codegen, info.declaration);
-        std::string params = build_param_list(codegen, info.declaration, true);
-        header_builder << ret << " " << info.c_name << "_pageA(" << params << ");\n";
-        header_builder << ret << " " << info.c_name << "_pageB(" << params << ");\n";
+    // Collect globals
+    std::unordered_map<std::string, GlobalInfo> globals;
+    for (const auto& stmt : ctx.module.top_level) {
+        if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
+        if (!ctx.analysis.used_global_vars.count(stmt.get())) continue;
+        int scope_id = stmt->scope_instance_id;
+        std::string key = symbol_key(stmt->var_name, scope_id);
+        GlobalInfo info;
+        info.decl = stmt;
+        info.scope_id = scope_id;
+        info.is_pointer_like = is_pointer_like(stmt->var_type);
+        info.c_name = header_codegen.mangle(stmt->var_name);
+        if (scope_id >= 0) {
+            info.c_name += "_s" + std::to_string(scope_id);
+        }
+        bool force_ram = has_annotation(stmt->annotations, "nonbanked");
+        VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
+        auto mit = ctx.analysis.var_mutability.find(stmt.get());
+        if (mit != ctx.analysis.var_mutability.end()) mut = mit->second;
+        info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
+        if (info.is_rom) {
+            info.module_name = "rom_" + info.c_name;
+        }
+        globals[key] = info;
     }
-    write_file(header_path.string(), header_builder.str());
 
-    std::string header_include = "#include \"" + header_path.filename().string() + "\"\n";
-
-    std::ostringstream runtime_builder;
-    runtime_builder << header_include << "#include \"megalinker.h\"\n";
-    runtime_builder << "int __vexel_current_page = 0;\n";
-
+    // Collect functions
     std::unordered_map<std::string, StmtPtr> function_map;
-    for (const auto& info : codegen.functions()) {
-        if (!info.declaration) continue;
-        std::string key = function_key(info.declaration);
-        function_map.emplace(key, info.declaration);
-    }
-
-    auto ensure_fn_type = [&](TypePtr type, const SourceLocation& loc, const std::string& what) {
-        if (!type) {
-            return;
-        }
-        if (type->kind == Type::Kind::Primitive) {
-            if (type->primitive == PrimitiveType::F32 || type->primitive == PrimitiveType::F64) {
-                throw CompileError("Megalinker backend does not support floating-point " + what, loc);
-            }
-            return;
-        }
-        throw CompileError("Megalinker backend cannot pass '" + what + "' by value", loc);
-    };
-
-    auto ensure_non_float_var = [&](TypePtr type, const SourceLocation& loc, const std::string& name) {
-        if (!type) {
-            throw CompileError("Megalinker backend requires explicit type for global '" + name + "'", loc);
-        }
-        if (type->kind == Type::Kind::Primitive &&
-            (type->primitive == PrimitiveType::F32 || type->primitive == PrimitiveType::F64)) {
-            throw CompileError("Megalinker backend does not support floating-point globals: " + name, loc);
-        }
-    };
-
-    for (const auto& info : codegen.functions()) {
-        if (!info.declaration) continue;
-        StmtPtr stmt = info.declaration;
-        if (!stmt->return_types.empty()) {
-            throw CompileError("Megalinker backend cannot return tuples by value", stmt->location);
-        }
-        ensure_fn_type(stmt->return_type, stmt->location, "return type of " + qualified_name(stmt));
-        for (size_t i = 0; i < stmt->params.size(); ++i) {
-            ensure_fn_type(stmt->params[i].type, stmt->location,
-                           "parameter " + std::to_string(i) + " of " + qualified_name(stmt));
-        }
-    }
-
-    for (const auto& var : codegen.variables()) {
-        if (!var.declaration) continue;
-        ensure_non_float_var(var.declaration->var_type, var.declaration->location, var.declaration->var_name);
-    }
-
-    std::unordered_map<std::string, std::vector<std::string>> adj;
-    std::unordered_map<std::string, int> color;
-
-    for (const auto& entry : function_map) {
-        const std::string& key = entry.first;
-        StmtPtr stmt = entry.second;
-        adj[key];
-        color[key] = -1;
-        if (!has_variant(ctx.analysis, key, 'N')) {
+    for (const auto& stmt : ctx.module.top_level) {
+        if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
+        if (stmt->is_external) continue;
+        if (!ctx.analysis.reachable_functions.count(reachability_key(qualified_name(stmt), stmt->scope_instance_id))) {
             continue;
         }
-        if (!stmt || !stmt->body) continue;
-
-        std::unordered_set<std::string> calls;
-        collect_calls(stmt->body, calls);
-
-        if (calls.count(key)) {
-            throw CompileError("Megalinker backend: recursion in '" + qualified_name(stmt) +
-                               "' requires a reentrant-only path", stmt->location);
+        bool has_expr_params = false;
+        for (const auto& p : stmt->params) {
+            if (p.is_expression_param) {
+                has_expr_params = true;
+                break;
+            }
         }
-
-        for (const auto& callee_key : calls) {
-            if (function_map.count(callee_key) == 0) continue;
-            if (!has_variant(ctx.analysis, callee_key, 'N')) continue;
-            adj[key].push_back(callee_key);
-            adj[callee_key].push_back(key);
-        }
+        if (has_expr_params) continue;
+        std::string key = reachability_key(qualified_name(stmt), stmt->scope_instance_id);
+        function_map[key] = stmt;
     }
 
-    auto bfs_color = [&](const std::string& start) {
-        std::queue<std::string> q;
-        q.push(start);
-        while (!q.empty()) {
-            std::string cur = q.front();
-            q.pop();
-            int cur_color = color[cur];
-            for (const auto& neigh : adj[cur]) {
-                if (!has_variant(ctx.analysis, neigh, 'N')) continue;
-                if (color[neigh] == -1) {
-                    color[neigh] = 1 - cur_color;
-                    q.push(neigh);
-                } else if (color[neigh] == cur_color) {
-                    auto it = function_map.find(neigh);
-                    StmtPtr decl = (it != function_map.end()) ? it->second : nullptr;
-                    throw CompileError("Megalinker backend: alternation conflict between '" + cur +
-                                       "' and '" + neigh + "'.", decl ? decl->location : SourceLocation());
+    struct VariantBuildInfo {
+        std::unordered_map<std::string, Variant> variants;
+        std::unordered_map<std::string, std::unordered_map<const Expr*, std::string>> call_targets;
+        std::unordered_map<std::string, std::unordered_map<const Expr*, CallTargetInfo>> call_overrides;
+        std::unordered_map<std::string, int> variant_counts;
+        std::unordered_map<std::string, std::unordered_set<std::string>> signature_callers;
+        std::unordered_set<std::string> trampoline_signatures;
+        std::unordered_map<std::string, std::string> trampoline_variants;
+        std::unordered_map<std::string, std::string> trampoline_names;
+        std::vector<std::string> order;
+    } build;
+
+    size_t caller_limit = caller_limit_from_env();
+    (void)parse_caller_limit_option(ctx.options.backend_options, caller_limit);
+
+    std::queue<std::string> pending;
+
+    auto add_variant = [&](const std::string& func_key,
+                           const StmtPtr& decl,
+                           const std::string& caller_id,
+                           char reent_key,
+                           const std::string& ref_key,
+                           const std::vector<PtrKind>& param_kinds,
+                           char page) -> std::string {
+        std::string pk = param_sig(decl, param_kinds);
+        std::string sig_key = signature_key(func_key, reent_key, ref_key, pk);
+        std::string caller_tag = caller_id;
+        if (caller_tag.empty()) {
+            caller_tag = "entry";
+        } else {
+            auto it = build.variants.find(caller_id);
+            if (it != build.variants.end()) {
+                caller_tag = it->second.name;
+            }
+        }
+        caller_tag = sanitize_tag(caller_tag);
+
+        std::string id = func_key + "|r" + std::string(1, reent_key) + "|ref" + ref_key + "|from" + caller_id +
+                         "|pk" + pk + "|p" + std::string(1, page);
+        auto it = build.variants.find(id);
+        if (it != build.variants.end()) {
+            return id;
+        }
+
+        int& count = build.variant_counts[func_key];
+        count++;
+        if (count > 100) {
+            throw CompileError("Megalinker backend: exceeded 100 variants for function '" + qualified_name(decl) + "'",
+                               decl ? decl->location : SourceLocation());
+        }
+
+        Variant v;
+        v.id = id;
+        v.func_key = func_key;
+        v.signature_key = sig_key;
+        v.caller_id = caller_id;
+        v.decl = decl;
+        v.ref_key = ref_key;
+        v.reent_key = reent_key;
+        v.param_kinds = param_kinds;
+        v.page = page;
+
+        std::string name = qualified_name(decl);
+        name += (reent_key == 'R') ? "__reent" : "__nonreent";
+        if (!ref_key.empty()) {
+            bool all_mut = std::all_of(ref_key.begin(), ref_key.end(), [](char c) { return c == 'M'; });
+            if (!all_mut) name += "__ref" + ref_key;
+        }
+        name += "__from_" + caller_tag;
+        if (!pk.empty()) name += "__pk" + pk;
+        name += "__p";
+        name.push_back(page);
+
+        v.name = name;
+        v.c_name = header_codegen.mangle(name);
+        v.module_name = v.c_name;
+
+        size_t param_idx = 0;
+        for (const auto& param : decl->params) {
+            if (param.is_expression_param) continue;
+            if (param_idx < param_kinds.size() && is_pointer_like(param.type)) {
+                v.param_kind_by_name[param.name] = param_kinds[param_idx];
+            }
+            param_idx++;
+        }
+
+        build.variants[id] = v;
+        build.order.push_back(id);
+        pending.push(id);
+        return id;
+    };
+
+    // Seed variants from exported functions
+    for (const auto& kv : function_map) {
+        const std::string& func_key = kv.first;
+        StmtPtr decl = kv.second;
+        if (!decl || !decl->is_exported) continue;
+
+        std::vector<char> reent_keys = available_reent_keys(ctx.analysis, func_key);
+        std::string base_ref = decl->ref_params.empty() ? "" : std::string(decl->ref_params.size(), 'M');
+
+        for (char reent_key : reent_keys) {
+            std::string ref_key = choose_ref_key(ctx.analysis, decl, base_ref);
+            std::vector<PtrKind> param_kinds;
+            for (const auto& param : decl->params) {
+                if (param.is_expression_param) continue;
+                if (is_pointer_like(param.type)) {
+                    param_kinds.push_back(PtrKind::Far);
+                } else {
+                    param_kinds.push_back(PtrKind::Ram);
                 }
             }
-        }
-    };
-
-    int next_export_color = 0;
-    for (const auto& entry : function_map) {
-        StmtPtr stmt = entry.second;
-        if (!stmt || !stmt->is_exported) continue;
-        const std::string& key = entry.first;
-        if (!has_variant(ctx.analysis, key, 'N')) continue;
-        if (color[key] == -1) {
-            color[key] = next_export_color;
-            next_export_color = 1 - next_export_color;
-            bfs_color(key);
+            (void)add_variant(func_key, decl, "", reent_key, ref_key, param_kinds, 'A');
         }
     }
 
-    int next_color = next_export_color;
-    for (const auto& entry : color) {
-        if (entry.second != -1) continue;
-        const std::string& key = entry.first;
-        if (!has_variant(ctx.analysis, key, 'N')) continue;
-        color[key] = next_color;
-        next_color = 1 - next_color;
-        bfs_color(key);
-    }
+    // BFS through call graph
+    while (!pending.empty()) {
+        std::string vid = pending.front();
+        pending.pop();
+        auto vit = build.variants.find(vid);
+        if (vit == build.variants.end()) continue;
+        Variant& variant = vit->second;
+        if (!variant.decl || !variant.decl->body) continue;
 
-    auto write_megalinker_file = [&](const std::string& stem, const std::string& body) {
-        std::filesystem::path path = out_dir / stem;
-        write_file(path.string(), header_include + body);
-    };
+        std::vector<ExprPtr> calls;
+        collect_call_exprs(variant.decl->body, calls);
+        for (const auto& call : calls) {
+            if (!call || call->kind != Expr::Kind::Call) continue;
+            if (!call->operand || call->operand->kind != Expr::Kind::Identifier) continue;
 
-    for (const auto& info : codegen.functions()) {
-        if (!info.declaration) continue;
-        std::string key = function_key(info.declaration);
-        bool is_reent = info_is_reentrant_variant(ctx.analysis, info, key);
-        int page = is_reent ? 0 : (color.count(key) ? color[key] : 0);
-        if (page < 0) page = 0;
-        std::string suffix = page == 0 ? "_pageA" : "_pageB";
-        std::string filename = info.c_name + suffix + ".c";
-        std::ostringstream body;
-        body << "// page " << (page == 0 ? "A" : "B") << "\n";
-        body << info.code << "\n";
+            Symbol* sym = ctx.checker.get_scope()->lookup(call->operand->name);
+            if (!sym || sym->kind != Symbol::Kind::Function || !sym->declaration) continue;
+            if (sym->declaration->is_external) continue;
 
-        if (info.declaration->is_exported) {
-            std::string ret = build_return_type(codegen, info.declaration);
-            std::string params = build_param_list(codegen, info.declaration, true);
-            std::string args = build_arg_list(codegen, info.declaration);
-            bool returns_void = (ret == "void");
-            body << ret << " " << info.c_name << "_pageA(" << params << ") {\n";
-            if (!returns_void) {
-                body << "  return " << info.c_name << "(" << args << ");\n";
-            } else {
-                body << "  " << info.c_name << "(" << args << ");\n";
+            std::string callee_name = sym->declaration->func_name;
+            if (!sym->declaration->type_namespace.empty()) {
+                callee_name = sym->declaration->type_namespace + "::" + callee_name;
             }
-            body << "}\n";
-            body << ret << " " << info.c_name << "_pageB(" << params << ") {\n";
-            if (!returns_void) {
-                body << "  return " << info.c_name << "(" << args << ");\n";
-            } else {
-                body << "  " << info.c_name << "(" << args << ");\n";
-            }
-            body << "}\n";
-        }
+            int scope_id = sym->scope_instance_id;
+            std::string callee_key = reachability_key(callee_name, scope_id);
 
-        write_megalinker_file(filename, body.str());
+            auto f_it = function_map.find(callee_key);
+            if (f_it == function_map.end()) continue;
+
+            char desired_reent = choose_reent_key(ctx.analysis, callee_key, variant.reent_key);
+            std::string desired_ref = ref_variant_key(call, sym->declaration->ref_params.size());
+            desired_ref = choose_ref_key(ctx.analysis, sym->declaration, desired_ref);
+
+            std::vector<PtrKind> param_kinds;
+            size_t arg_idx = 0;
+            for (size_t i = 0; i < sym->declaration->params.size(); ++i) {
+                const auto& param = sym->declaration->params[i];
+                if (param.is_expression_param) {
+                    arg_idx++;
+                    continue;
+                }
+                ExprPtr arg_expr = (arg_idx < call->args.size()) ? call->args[arg_idx] : nullptr;
+                if (is_pointer_like(param.type)) {
+                    param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, ctx.checker));
+                } else {
+                    param_kinds.push_back(PtrKind::Ram);
+                }
+                arg_idx++;
+            }
+
+            std::string pk = param_sig(sym->declaration, param_kinds);
+            std::string sig_key = signature_key(callee_key, desired_reent, desired_ref, pk);
+
+            bool use_trampoline = build.trampoline_signatures.count(sig_key) > 0;
+            if (!use_trampoline) {
+                auto& callers = build.signature_callers[sig_key];
+                callers.insert(variant.id);
+                if (callers.size() > caller_limit) {
+                    use_trampoline = true;
+                    build.trampoline_signatures.insert(sig_key);
+                    if (ctx.options.verbose) {
+                        std::cout << "Megalinker: using nonbanked trampoline for "
+                                  << qualified_name(sym->declaration) << " (callers="
+                                  << callers.size() << ", limit=" << caller_limit << ")\n";
+                    } else {
+                        std::cerr << "Megalinker: info: using nonbanked trampoline for "
+                                  << qualified_name(sym->declaration) << " (callers="
+                                  << callers.size() << ", limit=" << caller_limit << ")\n";
+                    }
+                }
+            }
+
+            if (use_trampoline) {
+                auto it = build.trampoline_variants.find(sig_key);
+                if (it == build.trampoline_variants.end()) {
+                    std::string tramp_name = trampoline_name(sym->declaration, desired_reent, desired_ref, pk);
+                    build.trampoline_names[sig_key] = header_codegen.mangle(tramp_name);
+                    std::string tramp_id = add_variant(callee_key, sym->declaration, "", desired_reent,
+                                                       desired_ref, param_kinds, 'A');
+                    build.trampoline_variants[sig_key] = tramp_id;
+                }
+                CallTargetInfo info;
+                info.name = build.trampoline_names[sig_key];
+                info.module_id_expr.clear();
+                info.page = variant.page;
+                build.call_overrides[variant.id][call.get()] = info;
+                continue;
+            }
+
+            char callee_page = (variant.page == 'A') ? 'B' : 'A';
+            std::string callee_id = add_variant(callee_key, sym->declaration, variant.id,
+                                                desired_reent, desired_ref, param_kinds, callee_page);
+            build.call_targets[variant.id][call.get()] = callee_id;
+        }
     }
 
-    std::ostringstream rom;
-    std::ostringstream ram;
-
-    for (const auto& var : codegen.variables()) {
-        if (!var.declaration) continue;
-        bool force_ram = has_annotation(var.declaration->annotations, "nonbanked");
-        auto mut_it = ctx.analysis.var_mutability.find(var.declaration.get());
-        bool is_mutable = var.declaration->is_mutable;
-        if (mut_it != ctx.analysis.var_mutability.end()) {
-            is_mutable = (mut_it->second == VarMutability::Mutable ||
-                          mut_it->second == VarMutability::NonMutableRuntime);
+    // Determine restore needs per variant
+    for (const auto& id : build.order) {
+        Variant& variant = build.variants[id];
+        bool alters = false;
+        auto ct = build.call_targets.find(id);
+        if (ct != build.call_targets.end() && !ct->second.empty()) {
+            alters = true;
         }
-        if (force_ram || is_mutable) {
-            ram << var.code << "\n";
+        if (!alters && variant.decl && variant.decl->body) {
+            alters = expr_uses_rom_symbol(variant.decl->body, globals, ctx.checker);
+        }
+        variant.alters_caller_page = alters;
+        if (!variant.caller_id.empty() && alters) {
+            if (build.variants.find(variant.caller_id) != build.variants.end()) {
+                variant.needs_restore = true;
+            }
+        }
+    }
+
+    // Emit variants
+    std::string header_include = "#include \"" + header_path.filename().string() + "\"\n";
+    std::ostringstream header_builder;
+    header_builder << header_result.header;
+
+    // Extern declarations for globals
+    for (const auto& kv : globals) {
+        const GlobalInfo& info = kv.second;
+        StmtPtr decl = info.decl;
+        if (!decl) continue;
+        std::string name = header_codegen.mangle(decl->var_name);
+        if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
+        std::string mut = mutability_prefix(ctx.analysis, decl);
+        if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
+            std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
+            std::string size = array_size_str(ctx.checker, decl->var_type, decl->location);
+            header_builder << "extern " << mut << elem_type << " " << name << "[" << size << "];\n";
         } else {
-            rom << var.code << "\n";
+            std::string type = decl->var_type ? header_codegen.type_to_c(decl->var_type) : "int";
+            header_builder << "extern " << mut << type << " " << name << ";\n";
         }
     }
 
-    write_megalinker_file("rom_globals_pageA.c", rom.str());
-    write_megalinker_file("ram_globals.c", ram.str());
+    header_builder << "\n#ifndef VX_FARPTR\n";
+    header_builder << "#define VX_FARPTR(mod, addr) ((((uint32_t)(mod)) << 16) | ((uint16_t)(addr)))\n";
+    header_builder << "#endif\n";
+    header_builder << "#ifndef VX_FARPTR_MOD\n";
+    header_builder << "#define VX_FARPTR_MOD(ptr) ((uint8_t)(((uint32_t)(ptr) >> 16) & 0xFF))\n";
+    header_builder << "#endif\n";
+    header_builder << "#ifndef VX_FARPTR_ADDR\n";
+    header_builder << "#define VX_FARPTR_ADDR(ptr) ((uint16_t)((uint32_t)(ptr) & 0xFFFF))\n";
+    header_builder << "#endif\n";
+    header_builder << "void vx_load_module_id_a(uint8_t seg);\n";
+    header_builder << "void vx_load_module_id_b(uint8_t seg);\n";
+    header_builder << "uint16_t vx_strlen_far_a(uint32_t ptr);\n";
+    header_builder << "uint16_t vx_strlen_far_b(uint32_t ptr);\n";
 
-    std::unordered_map<std::string, std::string> func_key_to_cname;
-    for (const auto& info : codegen.functions()) {
+    // Segment declarations for all modules
+    std::unordered_set<std::string> module_names;
+    for (const auto& id : build.order) {
+        module_names.insert(build.variants[id].module_name);
+    }
+    for (const auto& kv : globals) {
+        if (kv.second.is_rom) {
+            module_names.insert(kv.second.module_name);
+        }
+    }
+    for (const auto& mod : module_names) {
+        header_builder << "extern const uint8_t __ML_SEGMENT_A_" << mod << ";\n";
+        header_builder << "extern const uint8_t __ML_SEGMENT_B_" << mod << ";\n";
+    }
+
+    // Generate function prototypes from variant definitions
+    std::unordered_map<std::string, std::string> variant_prototypes;
+    for (const auto& id : build.order) {
+        Variant& variant = build.variants[id];
+        CodegenABI abi;
+        abi.lower_aggregates = true;
+        abi.multi_file_globals = true;
+        if (variant.needs_restore) {
+            auto cit = build.variants.find(variant.caller_id);
+            if (cit != build.variants.end()) {
+                char restore_page = cit->second.page;
+                abi.return_prefix = std::string("vx_load_module_id_") +
+                                    (restore_page == 'A' ? "a" : "b") +
+                                    "(" + segment_expr(restore_page, cit->second.module_name) + ");";
+            }
+        }
+        abi.func_page = [&](const std::string&) { return variant.page; };
+        abi.func_module_id_expr = [&](const std::string&, char) {
+            char load_page = (variant.page == 'A') ? 'B' : 'A';
+            return segment_expr(load_page, variant.module_name);
+        };
+        abi.func_return_ptr_kind = [&](const std::string&) { return PtrKind::Far; };
+        abi.symbol_ptr_kind = [&](const std::string& name, int scope_id) {
+            auto it = variant.param_kind_by_name.find(name);
+            if (it != variant.param_kind_by_name.end()) return it->second;
+            std::string key = symbol_key(name, scope_id);
+            auto git = globals.find(key);
+            if (git != globals.end() && git->second.is_rom && git->second.is_pointer_like) {
+                return PtrKind::Far;
+            }
+            return PtrKind::Ram;
+        };
+        abi.expr_ptr_kind = [&](const ExprPtr& expr) {
+            return infer_ptr_kind(expr, variant, globals, ctx.checker);
+        };
+        abi.symbol_module_id_expr = [&](const std::string& name, int scope_id, char current_page) {
+            std::string key = symbol_key(name, scope_id);
+            auto git = globals.find(key);
+            if (git != globals.end() && git->second.is_rom && git->second.is_pointer_like) {
+                char load_page = (current_page == 'A') ? 'B' : 'A';
+                return segment_expr(load_page, git->second.module_name);
+            }
+            return std::string();
+        };
+        abi.symbol_load_expr = [&](const std::string& name, int scope_id, char current_page) {
+            std::string key = symbol_key(name, scope_id);
+            auto git = globals.find(key);
+            if (git != globals.end() && git->second.is_rom && !git->second.is_pointer_like) {
+                char load_page = (current_page == 'A') ? 'B' : 'A';
+                return segment_expr(load_page, git->second.module_name);
+            }
+            return std::string();
+        };
+        abi.resolve_call = [&](const ExprPtr& call_expr,
+                               const std::string&,
+                               const std::string&,
+                               const std::string& caller_variant_id,
+                               char,
+                               const std::string&) {
+            CallTargetInfo info;
+            auto oit = build.call_overrides.find(caller_variant_id);
+            if (oit != build.call_overrides.end()) {
+                auto oit2 = oit->second.find(call_expr.get());
+                if (oit2 != oit->second.end()) {
+                    return oit2->second;
+                }
+            }
+            auto it = build.call_targets.find(caller_variant_id);
+            if (it == build.call_targets.end()) return info;
+            auto it2 = it->second.find(call_expr.get());
+            if (it2 == it->second.end()) return info;
+            auto vit = build.variants.find(it2->second);
+            if (vit == build.variants.end()) return info;
+            const Variant& callee = vit->second;
+            info.name = callee.name;
+            info.page = callee.page;
+            info.module_id_expr = segment_expr(callee.page, callee.module_name);
+            return info;
+        };
+
+        CodeGenerator gen;
+        gen.set_abi(abi);
+        variant.info = gen.generate_single_function(ctx.module, variant.decl, &ctx.checker, &ctx.analysis,
+                                                    &ctx.optimization, abi, variant.ref_key, variant.reent_key,
+                                                    variant.name, variant.id);
+
+        size_t brace = variant.info.code.find('{');
+        if (brace != std::string::npos) {
+            std::string proto = variant.info.code.substr(0, brace);
+            while (!proto.empty() && std::isspace(static_cast<unsigned char>(proto.back()))) proto.pop_back();
+            variant_prototypes[id] = proto + ";";
+        }
+    }
+
+    for (const auto& id : build.order) {
+        auto it = variant_prototypes.find(id);
+        if (it != variant_prototypes.end()) {
+            header_builder << strip_static(it->second) << "\n";
+        }
+    }
+
+    // Trampoline prototypes
+    for (const auto& kv : build.trampoline_variants) {
+        const std::string& sig_key = kv.first;
+        const std::string& variant_id = kv.second;
+        auto pit = variant_prototypes.find(variant_id);
+        if (pit == variant_prototypes.end()) continue;
+        auto nit = build.trampoline_names.find(sig_key);
+        if (nit == build.trampoline_names.end()) continue;
+        std::string proto = replace_identifier_token(pit->second, build.variants[variant_id].c_name, nit->second);
+        proto = strip_static(proto);
+        header_builder << "__nonbanked " << proto << "\n";
+    }
+
+    // Exported wrappers
+    for (const auto& kv : function_map) {
+        StmtPtr decl = kv.second;
+        if (!decl || !decl->is_exported) continue;
+
+        // Choose first variant for the export (page A entry)
+        Variant* entry = nullptr;
+        for (const auto& id : build.order) {
+            Variant& v = build.variants[id];
+            if (v.decl == decl && v.page == 'A') {
+                entry = &v;
+                break;
+            }
+        }
+        if (!entry) continue;
+
+        std::string wrapper_name = header_codegen.mangle(qualified_name(decl));
+        std::string proto = variant_prototypes[entry->id];
+        if (!proto.empty()) {
+            std::string replaced = replace_identifier_token(proto, entry->c_name, wrapper_name);
+            replaced = strip_static(replaced);
+            header_builder << "__nonbanked " << replaced << "\n";
+        }
+    }
+
+    write_file(header_path.string(), header_builder.str());
+
+    // Emit function files
+    for (const auto& id : build.order) {
+        Variant& variant = build.variants[id];
+        std::ostringstream body;
+        body << "// page " << (variant.page == 'A' ? "A" : "B") << "\n";
+        body << variant.info.code << "\n";
+        std::filesystem::path path = out_dir / (variant.module_name + ".c");
+        write_file(path.string(), header_include + body.str());
+    }
+
+    // Emit ROM globals (one file per symbol) and RAM globals
+    CodeGenerator var_codegen;
+    CodegenABI var_abi;
+    var_abi.multi_file_globals = true;
+    var_codegen.set_abi(var_abi);
+    (void)var_codegen.generate(ctx.module, &ctx.checker, &ctx.analysis, &ctx.optimization);
+
+    std::ostringstream ram_body;
+    for (const auto& info : var_codegen.variables()) {
         if (!info.declaration) continue;
-        std::string key = function_key(info.declaration);
-        if (!has_variant(ctx.analysis, key, 'N')) continue;
-        if (info_is_reentrant_variant(ctx.analysis, info, key)) continue;
-        if (!func_key_to_cname.count(key)) {
-            func_key_to_cname[key] = info.c_name;
+        int scope_id = info.declaration->scope_instance_id;
+        std::string key = symbol_key(info.declaration->var_name, scope_id);
+        auto git = globals.find(key);
+        if (git != globals.end() && git->second.is_rom) {
+            std::filesystem::path path = out_dir / (git->second.module_name + ".c");
+            write_file(path.string(), header_include + info.code + "\n");
+        } else {
+            ram_body << info.code << "\n";
         }
     }
-
-    std::unordered_map<std::string, int> index, lowlink;
-    std::unordered_set<std::string> on_stack;
-    std::vector<std::string> stack;
-    int idx = 0;
-    std::vector<std::vector<std::string>> sccs;
-
-    std::function<void(const std::string&)> strongconnect = [&](const std::string& v) {
-        index[v] = lowlink[v] = idx++;
-        stack.push_back(v);
-        on_stack.insert(v);
-        for (const auto& w : adj[v]) {
-            if (!has_variant(ctx.analysis, w, 'N')) continue;
-            if (!index.count(w)) {
-                strongconnect(w);
-                lowlink[v] = std::min(lowlink[v], lowlink[w]);
-            } else if (on_stack.count(w)) {
-                lowlink[v] = std::min(lowlink[v], index[w]);
-            }
-        }
-        if (lowlink[v] == index[v]) {
-            std::vector<std::string> comp;
-            while (!stack.empty()) {
-                std::string w = stack.back();
-                stack.pop_back();
-                on_stack.erase(w);
-                comp.push_back(w);
-                if (w == v) break;
-            }
-            if (comp.size() > 1) sccs.push_back(comp);
-        }
-    };
-
-    for (const auto& kv : adj) {
-        if (!index.count(kv.first) && has_variant(ctx.analysis, kv.first, 'N')) {
-            strongconnect(kv.first);
-        }
+    if (!ram_body.str().empty()) {
+        std::filesystem::path path = out_dir / "ram_globals.c";
+        write_file(path.string(), header_include + ram_body.str());
     }
 
-    for (const auto& comp : sccs) {
-        std::vector<std::string> members;
-        for (const auto& name : comp) {
-            if (!has_variant(ctx.analysis, name, 'N')) continue;
-            if (func_key_to_cname.count(name)) {
-                members.push_back(name);
-            }
+    // Runtime helpers
+    std::ostringstream runtime;
+    runtime << header_include;
+    runtime << "#include <stdint.h>\n";
+    runtime << "extern volatile uint8_t __ML_address_a;\n";
+    runtime << "extern volatile uint8_t __ML_address_b;\n";
+    runtime << "void vx_load_module_id_a(uint8_t seg) { __ML_address_a = seg; }\n";
+    runtime << "void vx_load_module_id_b(uint8_t seg) { __ML_address_b = seg; }\n";
+    runtime << "uint16_t vx_strlen_far_a(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); vx_load_module_id_a(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
+    runtime << "uint16_t vx_strlen_far_b(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); vx_load_module_id_b(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
+
+    // Trampoline wrappers
+    for (const auto& kv : build.trampoline_variants) {
+        const std::string& sig_key = kv.first;
+        const std::string& variant_id = kv.second;
+        auto pit = variant_prototypes.find(variant_id);
+        if (pit == variant_prototypes.end()) continue;
+        auto nit = build.trampoline_names.find(sig_key);
+        if (nit == build.trampoline_names.end()) continue;
+
+        Variant& target = build.variants[variant_id];
+        std::string proto = pit->second;
+        proto = replace_identifier_token(proto, target.c_name, nit->second);
+        proto = strip_static(proto);
+
+        std::string args = build_arg_list_from_proto(proto);
+        std::string ret_type = extract_return_type(proto, nit->second);
+        std::string ret_trim = trim_copy(ret_type);
+        bool returns_void = ret_trim.empty() || ret_trim == "void";
+
+        std::string sig = "__nonbanked " + proto;
+        size_t semi = sig.rfind(';');
+        if (semi != std::string::npos) sig.erase(semi, 1);
+        runtime << sig << " {\n";
+        runtime << "  uint8_t old_a = __ML_address_a;\n";
+        runtime << "  uint8_t old_b = __ML_address_b;\n";
+        runtime << "  vx_load_module_id_" << (target.page == 'A' ? "a" : "b") << "("
+                << segment_expr(target.page, target.module_name) << ");\n";
+        if (returns_void) {
+            runtime << "  " << target.c_name << "(" << args << ");\n";
+        } else {
+            runtime << "  " << ret_type << " result = " << target.c_name << "(" << args << ");\n";
         }
-        if (members.size() <= 1) continue;
-        const std::string& anchor = members.front();
-        std::string anchor_c = func_key_to_cname[anchor];
-        for (size_t i = 1; i < members.size(); ++i) {
-            std::string src_c = func_key_to_cname[members[i]];
-            runtime_builder << "ML_MOVE_SYMBOLS_TO(" << anchor_c << "," << src_c << ");\n";
+        runtime << "  __ML_address_a = old_a;\n";
+        runtime << "  __ML_address_b = old_b;\n";
+        if (returns_void) {
+            runtime << "  return;\n";
+        } else {
+            runtime << "  return result;\n";
         }
+        runtime << "}\n";
     }
 
-    write_file(runtime_path.string(), runtime_builder.str());
+    // Exported wrappers
+    for (const auto& kv : function_map) {
+        StmtPtr decl = kv.second;
+        if (!decl || !decl->is_exported) continue;
+        Variant* entry = nullptr;
+        for (const auto& id : build.order) {
+            Variant& v = build.variants[id];
+            if (v.decl == decl && v.page == 'A') {
+                entry = &v;
+                break;
+            }
+        }
+        if (!entry) continue;
+
+        std::string wrapper_name = header_codegen.mangle(qualified_name(decl));
+        std::string proto = variant_prototypes[entry->id];
+        if (proto.empty()) continue;
+
+        proto = replace_identifier_token(proto, entry->c_name, wrapper_name);
+        proto = strip_static(proto);
+
+        // Build wrapper signature
+        std::string sig;
+        sig.reserve(proto.size() + 32);
+        sig += "__nonbanked ";
+        sig += proto;
+        // Replace prototype semicolon with body
+        size_t semi = sig.rfind(';');
+        if (semi != std::string::npos) sig.erase(semi, 1);
+        sig += " {\n";
+
+        // Build argument list by parsing parameters from prototype
+        std::string args = build_arg_list_from_proto(proto);
+
+        runtime << sig;
+        runtime << "  ";
+        runtime << "vx_load_module_id_" << (entry->page == 'A' ? "a" : "b") << "(";
+        runtime << segment_expr(entry->page, entry->module_name) << ");\n";
+        bool returns_void = (entry->decl->return_types.empty() && !entry->decl->return_type);
+        if (returns_void && entry->decl->body && entry->decl->body->type) returns_void = false;
+        if (!entry->decl->return_types.empty()) returns_void = true;
+        if (entry->decl->return_type && entry->decl->return_type->kind == Type::Kind::Named) returns_void = true;
+
+        if (returns_void) {
+            runtime << "  " << entry->c_name << "(" << args << ");\n";
+        } else {
+            runtime << "  return " << entry->c_name << "(" << args << ");\n";
+        }
+        runtime << "}\n";
+    }
+
+    write_file(runtime_path.string(), runtime.str());
 }
 
 void register_backend_megalinker() {
     Backend backend;
     backend.info.name = "megalinker";
     backend.info.description = "Megalinker banked backend";
-    backend.info.version = "v0.2.1";
+    backend.info.version = "v0.3.0";
     backend.emit = emit_megalinker_backend;
     (void)register_backend(backend);
 }

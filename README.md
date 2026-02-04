@@ -23,11 +23,13 @@ Outputs:
 - `megalinker/*.c` (one file per function + globals)
 
 ## Notes
-- Exported (`&^`) functions get `_pageA`/`_pageB` entry points.
-- Non-reentrant functions are alternated between page A and page B.
-- Immutable globals are placed in `rom_globals_pageA.c`; mutable/runtime-initialized globals go to `ram_globals.c`.
-- Floating-point and struct-by-value returns/params are rejected.
-- Bank-switching macros are **not** injected yet; wrappers are direct calls.
+- Exported (`&^`) functions get a `__nonbanked` wrapper that targets a page-A entry variant.
+- Non-reentrant functions are alternated between page A and page B across the call graph.
+- Immutable globals are emitted one-per-symbol under `megalinker/rom_<name>.c`; mutable/runtime-initialized globals go to `megalinker/ram_globals.c`.
+- Bank-switching is emitted as direct segment assignments (no helper macros required).
+- Caller explosion protection: if a function signature has too many distinct callers, calls are routed through a `__nonbanked` trampoline that saves/restores both pages. Default limit is 10 and can be configured with:
+  - `--backend-opt caller_limit=<n>` (preferred)
+  - `VEXEL_MEGALINKER_CALLER_LIMIT=<n>` (fallback)
 
 ## Include path
 Generated C files include `megalinker.h`. Make sure your C build includes:
