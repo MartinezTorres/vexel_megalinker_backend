@@ -1,7 +1,7 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2
 
-VEXEL_ROOT ?= $(abspath ../..)
+VEXEL_ROOT ?= $(if $(VEXEL_ROOT_DIR),$(VEXEL_ROOT_DIR),$(abspath ../../..))
 VEXEL_BUILD ?= $(VEXEL_ROOT)/build
 
 CXXFLAGS += -I$(VEXEL_ROOT)/frontend/src -Isrc
@@ -14,7 +14,7 @@ LIB_SOURCES = $(filter-out src/megalinker_main.cpp,$(wildcard src/*.cpp))
 LIB_OBJECTS = $(patsubst src/%.cpp,$(VEXEL_BUILD)/backends/megalinker/%.o,$(LIB_SOURCES))
 CLI_OBJECT = $(VEXEL_BUILD)/backends/megalinker/megalinker_main.o
 
-.PHONY: all clean
+.PHONY: all clean test
 
 all: $(TARGET) $(CLI)
 
@@ -37,5 +37,8 @@ clean:
 	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends/megalinker
 	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends
 	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)
+
+test:
+	@bash tests/test.sh
 
 -include $(LIB_OBJECTS:.o=.d) $(CLI_OBJECT:.o=.d)

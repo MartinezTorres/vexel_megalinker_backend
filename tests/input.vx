@@ -1,0 +1,26 @@
+G1:#i32 = 5;
+G2:#i32 = 7;
+GM:#i32;
+
+&reader() -> #i32 {
+  GM = GM + 1;
+  x:#i32 = G1;
+  x + GM
+}
+
+&callee(n:#i32) -> #i32 {
+  n + GM + G2
+}
+
+&caller1() -> #i32 {
+  reader() + callee(1)
+}
+
+&caller2() -> #i32 {
+  callee(2)
+}
+
+&^main() -> #i32 {
+  GM = 0;
+  caller1() + caller2()
+}

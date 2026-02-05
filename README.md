@@ -5,7 +5,7 @@ It is intentionally kept out-of-tree to exercise the backend plugin interface.
 
 ## Build
 ```
-VEXEL_ROOT=../.. make
+VEXEL_ROOT=../../.. make
 ```
 
 Artifacts:
@@ -34,5 +34,5 @@ Outputs:
 ## Include path
 Generated C files include `megalinker.h`. Make sure your C build includes:
 ```
--I/path/to/ext/vexel_megalinker_backend/include
+-I/path/to/backends/ext/megalinker/include
 ```
