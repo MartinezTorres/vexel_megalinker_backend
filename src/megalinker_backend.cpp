@@ -48,6 +48,22 @@ static std::string symbol_key(const std::string& name, int scope_id) {
     return name;
 }
 
+static int scope_id_for_symbol(const Symbol* sym, int entry_instance_id) {
+    if (!sym || sym->is_local) return -1;
+    if (sym->instance_id < 0 || sym->instance_id == entry_instance_id) return -1;
+    return sym->instance_id;
+}
+
+static std::string symbol_key_for(const Symbol* sym, int entry_instance_id) {
+    if (!sym) return "";
+    return symbol_key(sym->name, scope_id_for_symbol(sym, entry_instance_id));
+}
+
+static std::string func_key_for(const Symbol* sym, int entry_instance_id) {
+    if (!sym) return "";
+    return reachability_key(sym->name, scope_id_for_symbol(sym, entry_instance_id));
+}
+
 static std::string sanitize_tag(const std::string& input) {
     std::string out;
     out.reserve(input.size());
@@ -299,8 +315,8 @@ static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
     }
 }
 
-static std::string mutability_prefix(const AnalysisFacts& facts, StmtPtr stmt) {
-    auto it = facts.var_mutability.find(stmt.get());
+static std::string mutability_prefix(const AnalysisFacts& facts, const Symbol* sym, StmtPtr stmt) {
+    auto it = sym ? facts.var_mutability.find(sym) : facts.var_mutability.end();
     VarMutability kind = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
     if (it != facts.var_mutability.end()) {
         kind = it->second;
@@ -337,6 +353,7 @@ static std::string array_size_str(TypeChecker& checker, TypePtr type, const Sour
 
 struct GlobalInfo {
     StmtPtr decl;
+    const Symbol* sym = nullptr;
     bool is_rom = false;
     bool is_pointer_like = false;
     std::string module_name;
@@ -346,22 +363,26 @@ struct GlobalInfo {
 
 static bool expr_uses_rom_symbol(ExprPtr expr,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker);
+                                 TypeChecker& checker,
+                                 int instance_id,
+                                 int entry_instance_id);
 
 static bool stmt_uses_rom_symbol(StmtPtr stmt,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker) {
+                                 TypeChecker& checker,
+                                 int instance_id,
+                                 int entry_instance_id) {
     if (!stmt) return false;
     switch (stmt->kind) {
         case Stmt::Kind::Expr:
-            return expr_uses_rom_symbol(stmt->expr, globals, checker);
+            return expr_uses_rom_symbol(stmt->expr, globals, checker, instance_id, entry_instance_id);
         case Stmt::Kind::Return:
-            return expr_uses_rom_symbol(stmt->return_expr, globals, checker);
+            return expr_uses_rom_symbol(stmt->return_expr, globals, checker, instance_id, entry_instance_id);
         case Stmt::Kind::VarDecl:
-            return expr_uses_rom_symbol(stmt->var_init, globals, checker);
+            return expr_uses_rom_symbol(stmt->var_init, globals, checker, instance_id, entry_instance_id);
         case Stmt::Kind::ConditionalStmt:
-            if (expr_uses_rom_symbol(stmt->condition, globals, checker)) return true;
-            return stmt_uses_rom_symbol(stmt->true_stmt, globals, checker);
+            if (expr_uses_rom_symbol(stmt->condition, globals, checker, instance_id, entry_instance_id)) return true;
+            return stmt_uses_rom_symbol(stmt->true_stmt, globals, checker, instance_id, entry_instance_id);
         default:
             return false;
     }
@@ -369,71 +390,68 @@ static bool stmt_uses_rom_symbol(StmtPtr stmt,
 
 static bool expr_uses_rom_symbol(ExprPtr expr,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker) {
+                                 TypeChecker& checker,
+                                 int instance_id,
+                                 int entry_instance_id) {
     if (!expr) return false;
     switch (expr->kind) {
         case Expr::Kind::Identifier: {
-            int scope_id = expr->scope_instance_id;
-            if (scope_id < 0) {
-                Symbol* sym = checker.get_scope()->lookup(expr->name);
-                if (sym && sym->scope_instance_id >= 0) {
-                    scope_id = sym->scope_instance_id;
-                }
-            }
-            std::string key = symbol_key(expr->name, scope_id);
+            Symbol* sym = checker.binding_for(instance_id, expr.get());
+            if (!sym) return false;
+            std::string key = symbol_key_for(sym, entry_instance_id);
             auto it = globals.find(key);
             return it != globals.end() && it->second.is_rom;
         }
         case Expr::Kind::Call:
             for (const auto& rec : expr->receivers) {
-                if (expr_uses_rom_symbol(rec, globals, checker)) return true;
+                if (expr_uses_rom_symbol(rec, globals, checker, instance_id, entry_instance_id)) return true;
             }
             for (const auto& arg : expr->args) {
-                if (expr_uses_rom_symbol(arg, globals, checker)) return true;
+                if (expr_uses_rom_symbol(arg, globals, checker, instance_id, entry_instance_id)) return true;
             }
             if (expr->operand && expr->operand->kind != Expr::Kind::Identifier) {
-                return expr_uses_rom_symbol(expr->operand, globals, checker);
+                return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
             }
             return false;
         case Expr::Kind::Binary:
-            return expr_uses_rom_symbol(expr->left, globals, checker) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker);
+            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Unary:
-            return expr_uses_rom_symbol(expr->operand, globals, checker);
+            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Index:
-            return expr_uses_rom_symbol(expr->left, globals, checker) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker);
+            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Member:
-            return expr_uses_rom_symbol(expr->operand, globals, checker);
+            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::ArrayLiteral:
         case Expr::Kind::TupleLiteral:
             for (const auto& elem : expr->elements) {
-                if (expr_uses_rom_symbol(elem, globals, checker)) return true;
+                if (expr_uses_rom_symbol(elem, globals, checker, instance_id, entry_instance_id)) return true;
             }
             return false;
         case Expr::Kind::Block:
             for (const auto& st : expr->statements) {
-                if (stmt_uses_rom_symbol(st, globals, checker)) return true;
+                if (stmt_uses_rom_symbol(st, globals, checker, instance_id, entry_instance_id)) return true;
             }
-            return expr_uses_rom_symbol(expr->result_expr, globals, checker);
+            return expr_uses_rom_symbol(expr->result_expr, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Conditional:
-            return expr_uses_rom_symbol(expr->condition, globals, checker) ||
-                   expr_uses_rom_symbol(expr->true_expr, globals, checker) ||
-                   expr_uses_rom_symbol(expr->false_expr, globals, checker);
+            return expr_uses_rom_symbol(expr->condition, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->true_expr, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->false_expr, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Cast:
-            return expr_uses_rom_symbol(expr->operand, globals, checker);
+            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Assignment:
-            return expr_uses_rom_symbol(expr->left, globals, checker) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker);
+            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Range:
-            return expr_uses_rom_symbol(expr->left, globals, checker) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker);
+            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Length:
-            return expr_uses_rom_symbol(expr->operand, globals, checker);
+            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
         case Expr::Kind::Iteration:
         case Expr::Kind::Repeat:
-            return expr_uses_rom_symbol(expr->left, globals, checker) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker);
+            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
         default:
             return false;
     }
@@ -445,6 +463,9 @@ struct Variant {
     std::string signature_key;
     std::string caller_id;
     StmtPtr decl;
+    const Symbol* sym = nullptr;
+    int instance_id = -1;
+    int scope_id = -1;
     std::string ref_key;
     char reent_key = 'N';
     std::vector<PtrKind> param_kinds;
@@ -466,7 +487,8 @@ static std::string segment_expr(char page, const std::string& module) {
 static PtrKind infer_ptr_kind(ExprPtr expr,
                               const Variant& variant,
                               const std::unordered_map<std::string, GlobalInfo>& globals,
-                              TypeChecker& checker) {
+                              TypeChecker& checker,
+                              int entry_instance_id) {
     if (!expr || !expr->type) return PtrKind::Ram;
     if (!is_pointer_like(expr->type)) return PtrKind::Ram;
 
@@ -479,14 +501,9 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
             if (it != variant.param_kind_by_name.end()) {
                 return it->second;
             }
-            int scope_id = expr->scope_instance_id;
-            if (scope_id < 0) {
-                Symbol* sym = checker.get_scope()->lookup(expr->name);
-                if (sym && sym->scope_instance_id >= 0) {
-                    scope_id = sym->scope_instance_id;
-                }
-            }
-            std::string key = symbol_key(expr->name, scope_id);
+            Symbol* sym = checker.binding_for(variant.instance_id, expr.get());
+            if (!sym) return PtrKind::Ram;
+            std::string key = symbol_key_for(sym, entry_instance_id);
             auto git = globals.find(key);
             if (git != globals.end() && git->second.is_rom) {
                 return PtrKind::Far;
@@ -496,22 +513,19 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
         case Expr::Kind::Call:
             return PtrKind::Far;
         case Expr::Kind::Conditional: {
-            PtrKind a = infer_ptr_kind(expr->true_expr, variant, globals, checker);
-            PtrKind b = infer_ptr_kind(expr->false_expr, variant, globals, checker);
+            PtrKind a = infer_ptr_kind(expr->true_expr, variant, globals, checker, entry_instance_id);
+            PtrKind b = infer_ptr_kind(expr->false_expr, variant, globals, checker, entry_instance_id);
             return (a == PtrKind::Far || b == PtrKind::Far) ? PtrKind::Far : PtrKind::Ram;
         }
         case Expr::Kind::Block:
-            return infer_ptr_kind(expr->result_expr, variant, globals, checker);
+            return infer_ptr_kind(expr->result_expr, variant, globals, checker, entry_instance_id);
         case Expr::Kind::Cast:
-            return infer_ptr_kind(expr->operand, variant, globals, checker);
+            return infer_ptr_kind(expr->operand, variant, globals, checker, entry_instance_id);
         case Expr::Kind::Member:
             if (expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
-                int scope_id = expr->operand->scope_instance_id;
-                if (scope_id < 0) {
-                    Symbol* sym = checker.get_scope()->lookup(expr->operand->name);
-                    if (sym && sym->scope_instance_id >= 0) scope_id = sym->scope_instance_id;
-                }
-                std::string key = symbol_key(expr->operand->name, scope_id);
+                Symbol* sym = checker.binding_for(variant.instance_id, expr->operand.get());
+                if (!sym) return PtrKind::Ram;
+                std::string key = symbol_key_for(sym, entry_instance_id);
                 auto git = globals.find(key);
                 if (git != globals.end() && git->second.is_rom) {
                     return PtrKind::Far;
@@ -523,21 +537,23 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
     }
 }
 
-static std::vector<char> available_reent_keys(const AnalysisFacts& facts, const std::string& func_key) {
+static std::vector<char> available_reent_keys(const AnalysisFacts& facts, const Symbol* sym) {
     std::vector<char> keys;
-    auto it = facts.reentrancy_variants.find(func_key);
-    if (it != facts.reentrancy_variants.end()) {
-        keys.assign(it->second.begin(), it->second.end());
+    if (sym) {
+        auto it = facts.reentrancy_variants.find(sym);
+        if (it != facts.reentrancy_variants.end()) {
+            keys.assign(it->second.begin(), it->second.end());
+        }
     }
     if (keys.empty()) keys.push_back('N');
     std::sort(keys.begin(), keys.end());
     return keys;
 }
 
-static std::string choose_ref_key(const AnalysisFacts& facts, const StmtPtr& decl, const std::string& desired) {
+static std::string choose_ref_key(const AnalysisFacts& facts, const Symbol* sym,
+                                  const StmtPtr& decl, const std::string& desired) {
     if (!decl) return desired;
-    std::string func_name = qualified_name(decl);
-    auto it = facts.ref_variants.find(func_name);
+    auto it = sym ? facts.ref_variants.find(sym) : facts.ref_variants.end();
     if (it == facts.ref_variants.end() || it->second.empty()) {
         return desired.empty() ? std::string(decl->ref_params.size(), 'M') : desired;
     }
@@ -545,8 +561,8 @@ static std::string choose_ref_key(const AnalysisFacts& facts, const StmtPtr& dec
     return std::string(decl->ref_params.size(), 'M');
 }
 
-static char choose_reent_key(const AnalysisFacts& facts, const std::string& func_key, char desired) {
-    auto it = facts.reentrancy_variants.find(func_key);
+static char choose_reent_key(const AnalysisFacts& facts, const Symbol* sym, char desired) {
+    auto it = sym ? facts.reentrancy_variants.find(sym) : facts.reentrancy_variants.end();
     if (it == facts.reentrancy_variants.end() || it->second.empty()) {
         return desired;
     }
@@ -644,50 +660,118 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         std::cout << "Writing runtime: " << runtime_path << std::endl;
     }
 
+    Program* program = ctx.checker.get_program();
+    int entry_instance_id = (program && !program->instances.empty()) ? program->instances.front().id : 0;
+    int saved_instance = ctx.checker.current_instance();
+
     // Collect globals
     std::unordered_map<std::string, GlobalInfo> globals;
-    for (const auto& stmt : ctx.module.top_level) {
-        if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
-        if (!ctx.analysis.used_global_vars.count(stmt.get())) continue;
-        int scope_id = stmt->scope_instance_id;
-        std::string key = symbol_key(stmt->var_name, scope_id);
-        GlobalInfo info;
-        info.decl = stmt;
-        info.scope_id = scope_id;
-        info.is_pointer_like = is_pointer_like(stmt->var_type);
-        info.c_name = header_codegen.mangle(stmt->var_name);
-        if (scope_id >= 0) {
-            info.c_name += "_s" + std::to_string(scope_id);
-        }
-        bool force_ram = has_annotation(stmt->annotations, "nonbanked");
-        VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-        auto mit = ctx.analysis.var_mutability.find(stmt.get());
-        if (mit != ctx.analysis.var_mutability.end()) mut = mit->second;
-        info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
-        if (info.is_rom) {
-            info.module_name = "rom_" + info.c_name;
-        }
-        globals[key] = info;
-    }
-
-    // Collect functions
-    std::unordered_map<std::string, StmtPtr> function_map;
-    for (const auto& stmt : ctx.module.top_level) {
-        if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
-        if (stmt->is_external) continue;
-        if (!ctx.analysis.reachable_functions.count(reachability_key(qualified_name(stmt), stmt->scope_instance_id))) {
-            continue;
-        }
-        bool has_expr_params = false;
-        for (const auto& p : stmt->params) {
-            if (p.is_expression_param) {
-                has_expr_params = true;
-                break;
+    if (program) {
+        for (const auto& instance : program->instances) {
+            ctx.checker.set_current_instance(instance.id);
+            const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
+            for (const auto& stmt : module.top_level) {
+                if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
+                Symbol* sym = ctx.checker.binding_for(instance.id, stmt.get());
+                if (!sym) continue;
+                int scope_id = scope_id_for_symbol(sym, entry_instance_id);
+                std::string key = symbol_key(stmt->var_name, scope_id);
+                GlobalInfo info;
+                info.decl = stmt;
+                info.sym = sym;
+                info.scope_id = scope_id;
+                info.is_pointer_like = is_pointer_like(stmt->var_type);
+                info.c_name = header_codegen.mangle(stmt->var_name);
+                if (scope_id >= 0) {
+                    info.c_name += "_s" + std::to_string(scope_id);
+                }
+                bool force_ram = has_annotation(stmt->annotations, "nonbanked");
+                VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
+                auto mit = ctx.analysis.var_mutability.find(sym);
+                if (mit != ctx.analysis.var_mutability.end()) mut = mit->second;
+                info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
+                if (!ctx.analysis.used_global_vars.count(sym) && !info.is_rom) {
+                    continue;
+                }
+                if (info.is_rom) {
+                    info.module_name = "rom_" + info.c_name;
+                }
+                globals[key] = info;
             }
         }
-        if (has_expr_params) continue;
-        std::string key = reachability_key(qualified_name(stmt), stmt->scope_instance_id);
-        function_map[key] = stmt;
+    } else {
+        for (const auto& stmt : ctx.module.top_level) {
+            if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
+            GlobalInfo info;
+            info.decl = stmt;
+            info.is_pointer_like = is_pointer_like(stmt->var_type);
+            info.c_name = header_codegen.mangle(stmt->var_name);
+            bool force_ram = has_annotation(stmt->annotations, "nonbanked");
+            VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
+            info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
+            if (info.is_rom) {
+                info.module_name = "rom_" + info.c_name;
+            }
+            globals[stmt->var_name] = info;
+        }
+    }
+
+    struct FunctionInfo {
+        const Symbol* sym = nullptr;
+        StmtPtr decl;
+        int instance_id = -1;
+        int scope_id = -1;
+    };
+
+    // Collect functions
+    std::unordered_map<std::string, FunctionInfo> function_map;
+    if (program) {
+        for (const auto& instance : program->instances) {
+            ctx.checker.set_current_instance(instance.id);
+            const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
+            for (const auto& stmt : module.top_level) {
+                if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
+                if (stmt->is_external) continue;
+                Symbol* sym = ctx.checker.binding_for(instance.id, stmt.get());
+                if (!sym || sym->kind != Symbol::Kind::Function) continue;
+                if (!ctx.analysis.reachable_functions.count(sym)) {
+                    continue;
+                }
+                bool has_expr_params = false;
+                for (const auto& p : stmt->params) {
+                    if (p.is_expression_param) {
+                        has_expr_params = true;
+                        break;
+                    }
+                }
+                if (has_expr_params) continue;
+                int scope_id = scope_id_for_symbol(sym, entry_instance_id);
+                std::string key = func_key_for(sym, entry_instance_id);
+                FunctionInfo info;
+                info.sym = sym;
+                info.decl = stmt;
+                info.instance_id = instance.id;
+                info.scope_id = scope_id;
+                function_map[key] = info;
+            }
+        }
+    } else {
+        for (const auto& stmt : ctx.module.top_level) {
+            if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
+            if (stmt->is_external) continue;
+            bool has_expr_params = false;
+            for (const auto& p : stmt->params) {
+                if (p.is_expression_param) {
+                    has_expr_params = true;
+                    break;
+                }
+            }
+            if (has_expr_params) continue;
+            std::string key = reachability_key(qualified_name(stmt), -1);
+            FunctionInfo info;
+            info.decl = stmt;
+            function_map[key] = info;
+        }
     }
 
     struct VariantBuildInfo {
@@ -708,12 +792,13 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     std::queue<std::string> pending;
 
     auto add_variant = [&](const std::string& func_key,
-                           const StmtPtr& decl,
+                           const FunctionInfo& info,
                            const std::string& caller_id,
                            char reent_key,
                            const std::string& ref_key,
                            const std::vector<PtrKind>& param_kinds,
                            char page) -> std::string {
+        const StmtPtr& decl = info.decl;
         std::string pk = param_sig(decl, param_kinds);
         std::string sig_key = signature_key(func_key, reent_key, ref_key, pk);
         std::string caller_tag = caller_id;
@@ -747,6 +832,9 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         v.signature_key = sig_key;
         v.caller_id = caller_id;
         v.decl = decl;
+        v.sym = info.sym;
+        v.instance_id = info.instance_id;
+        v.scope_id = info.scope_id;
         v.ref_key = ref_key;
         v.reent_key = reent_key;
         v.param_kinds = param_kinds;
@@ -764,7 +852,8 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         name.push_back(page);
 
         v.name = name;
-        v.c_name = header_codegen.mangle(name);
+        std::string suffix = (info.scope_id >= 0) ? "_s" + std::to_string(info.scope_id) : "";
+        v.c_name = header_codegen.mangle(name) + suffix;
         v.module_name = v.c_name;
 
         size_t param_idx = 0;
@@ -785,14 +874,16 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     // Seed variants from exported functions
     for (const auto& kv : function_map) {
         const std::string& func_key = kv.first;
-        StmtPtr decl = kv.second;
+        const FunctionInfo& info = kv.second;
+        StmtPtr decl = info.decl;
+        const Symbol* sym = info.sym;
         if (!decl || !decl->is_exported) continue;
 
-        std::vector<char> reent_keys = available_reent_keys(ctx.analysis, func_key);
+        std::vector<char> reent_keys = available_reent_keys(ctx.analysis, sym);
         std::string base_ref = decl->ref_params.empty() ? "" : std::string(decl->ref_params.size(), 'M');
 
         for (char reent_key : reent_keys) {
-            std::string ref_key = choose_ref_key(ctx.analysis, decl, base_ref);
+            std::string ref_key = choose_ref_key(ctx.analysis, sym, decl, base_ref);
             std::vector<PtrKind> param_kinds;
             for (const auto& param : decl->params) {
                 if (param.is_expression_param) continue;
@@ -802,7 +893,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                     param_kinds.push_back(PtrKind::Ram);
                 }
             }
-            (void)add_variant(func_key, decl, "", reent_key, ref_key, param_kinds, 'A');
+            (void)add_variant(func_key, info, "", reent_key, ref_key, param_kinds, 'A');
         }
     }
 
@@ -821,23 +912,18 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             if (!call || call->kind != Expr::Kind::Call) continue;
             if (!call->operand || call->operand->kind != Expr::Kind::Identifier) continue;
 
-            Symbol* sym = ctx.checker.get_scope()->lookup(call->operand->name);
+            Symbol* sym = ctx.checker.binding_for(variant.instance_id, call->operand.get());
             if (!sym || sym->kind != Symbol::Kind::Function || !sym->declaration) continue;
             if (sym->declaration->is_external) continue;
 
-            std::string callee_name = sym->declaration->func_name;
-            if (!sym->declaration->type_namespace.empty()) {
-                callee_name = sym->declaration->type_namespace + "::" + callee_name;
-            }
-            int scope_id = sym->scope_instance_id;
-            std::string callee_key = reachability_key(callee_name, scope_id);
+            std::string callee_key = func_key_for(sym, entry_instance_id);
 
             auto f_it = function_map.find(callee_key);
             if (f_it == function_map.end()) continue;
 
-            char desired_reent = choose_reent_key(ctx.analysis, callee_key, variant.reent_key);
+            char desired_reent = choose_reent_key(ctx.analysis, sym, variant.reent_key);
             std::string desired_ref = ref_variant_key(call, sym->declaration->ref_params.size());
-            desired_ref = choose_ref_key(ctx.analysis, sym->declaration, desired_ref);
+            desired_ref = choose_ref_key(ctx.analysis, sym, sym->declaration, desired_ref);
 
             std::vector<PtrKind> param_kinds;
             size_t arg_idx = 0;
@@ -849,7 +935,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                 }
                 ExprPtr arg_expr = (arg_idx < call->args.size()) ? call->args[arg_idx] : nullptr;
                 if (is_pointer_like(param.type)) {
-                    param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, ctx.checker));
+                    param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, ctx.checker, entry_instance_id));
                 } else {
                     param_kinds.push_back(PtrKind::Ram);
                 }
@@ -883,12 +969,13 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                 if (it == build.trampoline_variants.end()) {
                     std::string tramp_name = trampoline_name(sym->declaration, desired_reent, desired_ref, pk);
                     build.trampoline_names[sig_key] = header_codegen.mangle(tramp_name);
-                    std::string tramp_id = add_variant(callee_key, sym->declaration, "", desired_reent,
+                    std::string tramp_id = add_variant(callee_key, f_it->second, "", desired_reent,
                                                        desired_ref, param_kinds, 'A');
                     build.trampoline_variants[sig_key] = tramp_id;
                 }
                 CallTargetInfo info;
                 info.name = build.trampoline_names[sig_key];
+                info.name_is_mangled = true;
                 info.module_id_expr.clear();
                 info.page = variant.page;
                 build.call_overrides[variant.id][call.get()] = info;
@@ -896,7 +983,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             }
 
             char callee_page = (variant.page == 'A') ? 'B' : 'A';
-            std::string callee_id = add_variant(callee_key, sym->declaration, variant.id,
+            std::string callee_id = add_variant(callee_key, f_it->second, variant.id,
                                                 desired_reent, desired_ref, param_kinds, callee_page);
             build.call_targets[variant.id][call.get()] = callee_id;
         }
@@ -911,7 +998,8 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             alters = true;
         }
         if (!alters && variant.decl && variant.decl->body) {
-            alters = expr_uses_rom_symbol(variant.decl->body, globals, ctx.checker);
+            alters = expr_uses_rom_symbol(variant.decl->body, globals, ctx.checker,
+                                          variant.instance_id, entry_instance_id);
         }
         variant.alters_caller_page = alters;
         if (!variant.caller_id.empty() && alters) {
@@ -933,13 +1021,17 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         if (!decl) continue;
         std::string name = header_codegen.mangle(decl->var_name);
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
-        std::string mut = mutability_prefix(ctx.analysis, decl);
+        std::string mut = mutability_prefix(ctx.analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
             std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
             std::string size = array_size_str(ctx.checker, decl->var_type, decl->location);
             header_builder << "extern " << mut << elem_type << " " << name << "[" << size << "];\n";
         } else {
-            std::string type = decl->var_type ? header_codegen.type_to_c(decl->var_type) : "int";
+            if (!decl->var_type) {
+                throw CompileError("Internal error: global '" + decl->var_name +
+                                   "' missing type during megalinker codegen", decl->location);
+            }
+            std::string type = header_codegen.type_to_c(decl->var_type);
             header_builder << "extern " << mut << type << " " << name << ";\n";
         }
     }
@@ -1006,7 +1098,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             return PtrKind::Ram;
         };
         abi.expr_ptr_kind = [&](const ExprPtr& expr) {
-            return infer_ptr_kind(expr, variant, globals, ctx.checker);
+            return infer_ptr_kind(expr, variant, globals, ctx.checker, entry_instance_id);
         };
         abi.symbol_module_id_expr = [&](const std::string& name, int scope_id, char current_page) {
             std::string key = symbol_key(name, scope_id);
@@ -1056,7 +1148,8 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         CodeGenerator gen;
         gen.set_abi(abi);
         variant.info = gen.generate_single_function(ctx.module, variant.decl, &ctx.checker, &ctx.analysis,
-                                                    &ctx.optimization, abi, variant.ref_key, variant.reent_key,
+                                                    &ctx.optimization, abi, variant.instance_id,
+                                                    variant.ref_key, variant.reent_key,
                                                     variant.name, variant.id);
 
         size_t brace = variant.info.code.find('{');
@@ -1089,7 +1182,8 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
 
     // Exported wrappers
     for (const auto& kv : function_map) {
-        StmtPtr decl = kv.second;
+        const FunctionInfo& info = kv.second;
+        StmtPtr decl = info.decl;
         if (!decl || !decl->is_exported) continue;
 
         // Choose first variant for the export (page A entry)
@@ -1129,13 +1223,22 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     CodegenABI var_abi;
     var_abi.multi_file_globals = true;
     var_codegen.set_abi(var_abi);
-    (void)var_codegen.generate(ctx.module, &ctx.checker, &ctx.analysis, &ctx.optimization);
+    AnalysisFacts var_facts = ctx.analysis;
+    for (const auto& kv : globals) {
+        const GlobalInfo& info = kv.second;
+        if (info.is_rom && info.sym) {
+            var_facts.used_global_vars.insert(info.sym);
+        }
+    }
+    (void)var_codegen.generate(ctx.module, &ctx.checker, &var_facts, &ctx.optimization);
 
     std::ostringstream ram_body;
     for (const auto& info : var_codegen.variables()) {
         if (!info.declaration) continue;
-        int scope_id = info.declaration->scope_instance_id;
-        std::string key = symbol_key(info.declaration->var_name, scope_id);
+        const Symbol* sym = info.symbol;
+        int scope_id = scope_id_for_symbol(sym, entry_instance_id);
+        std::string key = sym ? symbol_key(sym->name, scope_id)
+                              : symbol_key(info.declaration->var_name, scope_id);
         auto git = globals.find(key);
         if (git != globals.end() && git->second.is_rom) {
             std::filesystem::path path = out_dir / (git->second.module_name + ".c");
@@ -1204,7 +1307,8 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
 
     // Exported wrappers
     for (const auto& kv : function_map) {
-        StmtPtr decl = kv.second;
+        const FunctionInfo& info = kv.second;
+        StmtPtr decl = info.decl;
         if (!decl || !decl->is_exported) continue;
         Variant* entry = nullptr;
         for (const auto& id : build.order) {
@@ -1254,6 +1358,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     }
 
     write_file(runtime_path.string(), runtime.str());
+    ctx.checker.set_current_instance(saved_instance);
 }
 
 void register_backend_megalinker() {
