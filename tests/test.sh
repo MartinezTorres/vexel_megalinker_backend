@@ -72,6 +72,10 @@ if rg -q "if \\(!?seg\\)" out__runtime.c; then
   echo "unexpected branch in load helper"
   exit 1
 fi
+if ! rg -q "__ML_SEGMENT_A_" out__runtime.c; then
+  echo "missing segment A paging references"
+  exit 1
+fi
 
 echo "ok"
 
