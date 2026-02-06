@@ -567,7 +567,9 @@ static char choose_reent_key(const AnalysisFacts& facts, const Symbol* sym, char
         return desired;
     }
     if (it->second.count(desired)) return desired;
-    return *(it->second.begin());
+    std::vector<char> keys(it->second.begin(), it->second.end());
+    std::sort(keys.begin(), keys.end());
+    return keys.front();
 }
 
 static std::string param_sig(const StmtPtr& decl, const std::vector<PtrKind>& kinds) {
