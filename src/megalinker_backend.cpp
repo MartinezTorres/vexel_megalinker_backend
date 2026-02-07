@@ -7,6 +7,7 @@
 #include "common.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -633,6 +634,55 @@ static bool parse_caller_limit_option(const std::unordered_map<std::string, std:
     }
     out = static_cast<size_t>(value);
     return true;
+}
+
+static bool parse_positive_int_option(const std::string& value, std::string& error) {
+    if (value.empty()) {
+        error = "Megalinker backend: --caller-limit requires a positive integer";
+        return false;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed <= 0) {
+        error = "Megalinker backend: --caller-limit requires a positive integer";
+        return false;
+    }
+    return true;
+}
+
+static bool parse_megalinker_option(int argc,
+                                    char** argv,
+                                    int& index,
+                                    Compiler::Options& options,
+                                    std::string& error) {
+    const char* arg = argv[index];
+    if (std::strcmp(arg, "--caller-limit") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --caller-limit requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_positive_int_option(value, error)) {
+            return true;
+        }
+        options.backend_options["caller_limit"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kPrefix = "--caller-limit=";
+    if (std::strncmp(arg, kPrefix, std::strlen(kPrefix)) == 0) {
+        std::string value = arg + std::strlen(kPrefix);
+        if (!parse_positive_int_option(value, error)) {
+            return true;
+        }
+        options.backend_options["caller_limit"] = value;
+        return true;
+    }
+    return false;
+}
+
+static void print_megalinker_usage(std::ostream& os) {
+    os << "  --caller-limit <n>  Caller-variant limit before nonbanked trampoline fallback (default: 10)\n";
 }
 
 } // namespace
@@ -1369,6 +1419,8 @@ void register_backend_megalinker() {
     backend.info.description = "Megalinker banked backend";
     backend.info.version = "v0.3.0";
     backend.emit = emit_megalinker_backend;
+    backend.parse_option = parse_megalinker_option;
+    backend.print_usage = print_megalinker_usage;
     (void)register_backend(backend);
 }
 
