@@ -4,11 +4,8 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2
 VEXEL_ROOT ?= $(if $(VEXEL_ROOT_DIR),$(VEXEL_ROOT_DIR),$(abspath ../../..))
 VEXEL_BUILD ?= $(VEXEL_ROOT)/build
 FRONTEND_INCLUDE_DIRS := $(shell find $(VEXEL_ROOT)/frontend/src -type d -print)
-COMMON_DIR ?= $(VEXEL_ROOT)/backends/common
-COMMON_INCLUDE_DIR := $(COMMON_DIR)/src
-COMMON_LIB := $(VEXEL_BUILD)/backends/common/libvexel-backend-common.a
 
-CXXFLAGS += -Isrc -I$(COMMON_INCLUDE_DIR) $(addprefix -I,$(FRONTEND_INCLUDE_DIRS))
+CXXFLAGS += -Isrc $(addprefix -I,$(FRONTEND_INCLUDE_DIRS))
 
 TARGET = $(VEXEL_BUILD)/backends/megalinker/libvexel-megalinker.a
 CLI = $(VEXEL_BUILD)/vexel-megalinker
@@ -26,12 +23,9 @@ $(TARGET): $(LIB_OBJECTS)
 	@mkdir -p $(@D)
 	ar rcs $@ $^
 
-$(CLI): $(CLI_OBJECT) $(TARGET) $(FRONTEND_LIB) $(COMMON_LIB)
+$(CLI): $(CLI_OBJECT) $(TARGET) $(FRONTEND_LIB)
 	@mkdir -p $(@D)
-	$(CXX) $(CXXFLAGS) $(CLI_OBJECT) -Wl,--start-group $(TARGET) $(COMMON_LIB) $(FRONTEND_LIB) -Wl,--end-group -o $@
-
-$(COMMON_LIB):
-	+$(MAKE) -C $(COMMON_DIR)
+	$(CXX) $(CXXFLAGS) $(CLI_OBJECT) -Wl,--start-group $(TARGET) $(FRONTEND_LIB) -Wl,--end-group -o $@
 
 $(VEXEL_BUILD)/backends/megalinker/%.o: src/%.cpp
 	@mkdir -p $(@D)
@@ -41,9 +35,9 @@ clean:
 	rm -f $(LIB_OBJECTS) $(CLI_OBJECT)
 	rm -f $(LIB_OBJECTS:.o=.d) $(CLI_OBJECT:.o=.d)
 	rm -f $(TARGET) $(CLI)
-	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends/megalinker
-	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends
-	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)
+	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends/megalinker 2>/dev/null || true
+	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD)/backends 2>/dev/null || true
+	rmdir --ignore-fail-on-non-empty $(VEXEL_BUILD) 2>/dev/null || true
 
 test:
 	@bash tests/test.sh

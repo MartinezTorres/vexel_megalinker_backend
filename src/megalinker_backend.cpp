@@ -3,7 +3,6 @@
 #include "codegen.h"
 #include "constants.h"
 #include "function_key.h"
-#include "evaluator.h"
 #include "common.h"
 #include <algorithm>
 #include <cctype>
@@ -19,6 +18,13 @@
 #include <vector>
 
 namespace vexel {
+
+using megalinker_codegen::CCodegenResult;
+using megalinker_codegen::CallTargetInfo;
+using megalinker_codegen::CodegenABI;
+using megalinker_codegen::CodeGenerator;
+using megalinker_codegen::GeneratedFunctionInfo;
+using megalinker_codegen::PtrKind;
 
 namespace {
 
@@ -334,15 +340,19 @@ static std::string mutability_prefix(const AnalysisFacts& facts, const Symbol* s
     }
 }
 
-static std::string array_size_str(TypeChecker& checker, TypePtr type, const SourceLocation& loc) {
+static std::string array_size_str(const AnalyzedProgram& analyzed, TypePtr type,
+                                  const SourceLocation& loc) {
     if (!type || type->kind != Type::Kind::Array || !type->array_size) {
         throw CompileError("Array size must be compile-time constant", loc);
     }
-    CompileTimeEvaluator evaluator(&checker);
-    CTValue size_val;
-    if (!evaluator.try_evaluate(type->array_size, size_val)) {
+    if (!analyzed.optimization) {
         throw CompileError("Array size must be compile-time constant", loc);
     }
+    auto it = analyzed.optimization->constexpr_values.find(type->array_size.get());
+    if (it == analyzed.optimization->constexpr_values.end()) {
+        throw CompileError("Array size must be compile-time constant", loc);
+    }
+    const CTValue& size_val = it->second;
     if (std::holds_alternative<int64_t>(size_val)) {
         return std::to_string(std::get<int64_t>(size_val));
     }
@@ -364,26 +374,26 @@ struct GlobalInfo {
 
 static bool expr_uses_rom_symbol(ExprPtr expr,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker,
+                                 const AnalyzedProgram& analyzed,
                                  int instance_id,
                                  int entry_instance_id);
 
 static bool stmt_uses_rom_symbol(StmtPtr stmt,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker,
+                                 const AnalyzedProgram& analyzed,
                                  int instance_id,
                                  int entry_instance_id) {
     if (!stmt) return false;
     switch (stmt->kind) {
         case Stmt::Kind::Expr:
-            return expr_uses_rom_symbol(stmt->expr, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(stmt->expr, globals, analyzed, instance_id, entry_instance_id);
         case Stmt::Kind::Return:
-            return expr_uses_rom_symbol(stmt->return_expr, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(stmt->return_expr, globals, analyzed, instance_id, entry_instance_id);
         case Stmt::Kind::VarDecl:
-            return expr_uses_rom_symbol(stmt->var_init, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(stmt->var_init, globals, analyzed, instance_id, entry_instance_id);
         case Stmt::Kind::ConditionalStmt:
-            if (expr_uses_rom_symbol(stmt->condition, globals, checker, instance_id, entry_instance_id)) return true;
-            return stmt_uses_rom_symbol(stmt->true_stmt, globals, checker, instance_id, entry_instance_id);
+            if (expr_uses_rom_symbol(stmt->condition, globals, analyzed, instance_id, entry_instance_id)) return true;
+            return stmt_uses_rom_symbol(stmt->true_stmt, globals, analyzed, instance_id, entry_instance_id);
         default:
             return false;
     }
@@ -391,13 +401,13 @@ static bool stmt_uses_rom_symbol(StmtPtr stmt,
 
 static bool expr_uses_rom_symbol(ExprPtr expr,
                                  const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 TypeChecker& checker,
+                                 const AnalyzedProgram& analyzed,
                                  int instance_id,
                                  int entry_instance_id) {
     if (!expr) return false;
     switch (expr->kind) {
         case Expr::Kind::Identifier: {
-            Symbol* sym = checker.binding_for(instance_id, expr.get());
+            Symbol* sym = analyzed.binding_for ? analyzed.binding_for(instance_id, expr.get()) : nullptr;
             if (!sym) return false;
             std::string key = symbol_key_for(sym, entry_instance_id);
             auto it = globals.find(key);
@@ -405,54 +415,54 @@ static bool expr_uses_rom_symbol(ExprPtr expr,
         }
         case Expr::Kind::Call:
             for (const auto& rec : expr->receivers) {
-                if (expr_uses_rom_symbol(rec, globals, checker, instance_id, entry_instance_id)) return true;
+                if (expr_uses_rom_symbol(rec, globals, analyzed, instance_id, entry_instance_id)) return true;
             }
             for (const auto& arg : expr->args) {
-                if (expr_uses_rom_symbol(arg, globals, checker, instance_id, entry_instance_id)) return true;
+                if (expr_uses_rom_symbol(arg, globals, analyzed, instance_id, entry_instance_id)) return true;
             }
             if (expr->operand && expr->operand->kind != Expr::Kind::Identifier) {
-                return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
+                return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
             }
             return false;
         case Expr::Kind::Binary:
-            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Unary:
-            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Index:
-            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Member:
-            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::ArrayLiteral:
         case Expr::Kind::TupleLiteral:
             for (const auto& elem : expr->elements) {
-                if (expr_uses_rom_symbol(elem, globals, checker, instance_id, entry_instance_id)) return true;
+                if (expr_uses_rom_symbol(elem, globals, analyzed, instance_id, entry_instance_id)) return true;
             }
             return false;
         case Expr::Kind::Block:
             for (const auto& st : expr->statements) {
-                if (stmt_uses_rom_symbol(st, globals, checker, instance_id, entry_instance_id)) return true;
+                if (stmt_uses_rom_symbol(st, globals, analyzed, instance_id, entry_instance_id)) return true;
             }
-            return expr_uses_rom_symbol(expr->result_expr, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->result_expr, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Conditional:
-            return expr_uses_rom_symbol(expr->condition, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->true_expr, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->false_expr, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->condition, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->true_expr, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->false_expr, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Cast:
-            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Assignment:
-            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Range:
-            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Length:
-            return expr_uses_rom_symbol(expr->operand, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
         case Expr::Kind::Iteration:
         case Expr::Kind::Repeat:
-            return expr_uses_rom_symbol(expr->left, globals, checker, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, checker, instance_id, entry_instance_id);
+            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
+                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
         default:
             return false;
     }
@@ -488,7 +498,7 @@ static std::string segment_expr(char page, const std::string& module) {
 static PtrKind infer_ptr_kind(ExprPtr expr,
                               const Variant& variant,
                               const std::unordered_map<std::string, GlobalInfo>& globals,
-                              TypeChecker& checker,
+                              const AnalyzedProgram& analyzed,
                               int entry_instance_id) {
     if (!expr || !expr->type) return PtrKind::Ram;
     if (!is_pointer_like(expr->type)) return PtrKind::Ram;
@@ -502,7 +512,7 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
             if (it != variant.param_kind_by_name.end()) {
                 return it->second;
             }
-            Symbol* sym = checker.binding_for(variant.instance_id, expr.get());
+            Symbol* sym = analyzed.binding_for ? analyzed.binding_for(variant.instance_id, expr.get()) : nullptr;
             if (!sym) return PtrKind::Ram;
             std::string key = symbol_key_for(sym, entry_instance_id);
             auto git = globals.find(key);
@@ -514,17 +524,17 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
         case Expr::Kind::Call:
             return PtrKind::Far;
         case Expr::Kind::Conditional: {
-            PtrKind a = infer_ptr_kind(expr->true_expr, variant, globals, checker, entry_instance_id);
-            PtrKind b = infer_ptr_kind(expr->false_expr, variant, globals, checker, entry_instance_id);
+            PtrKind a = infer_ptr_kind(expr->true_expr, variant, globals, analyzed, entry_instance_id);
+            PtrKind b = infer_ptr_kind(expr->false_expr, variant, globals, analyzed, entry_instance_id);
             return (a == PtrKind::Far || b == PtrKind::Far) ? PtrKind::Far : PtrKind::Ram;
         }
         case Expr::Kind::Block:
-            return infer_ptr_kind(expr->result_expr, variant, globals, checker, entry_instance_id);
+            return infer_ptr_kind(expr->result_expr, variant, globals, analyzed, entry_instance_id);
         case Expr::Kind::Cast:
-            return infer_ptr_kind(expr->operand, variant, globals, checker, entry_instance_id);
+            return infer_ptr_kind(expr->operand, variant, globals, analyzed, entry_instance_id);
         case Expr::Kind::Member:
             if (expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
-                Symbol* sym = checker.binding_for(variant.instance_id, expr->operand.get());
+                Symbol* sym = analyzed.binding_for ? analyzed.binding_for(variant.instance_id, expr->operand.get()) : nullptr;
                 if (!sym) return PtrKind::Ram;
                 std::string key = symbol_key_for(sym, entry_instance_id);
                 auto git = globals.find(key);
@@ -687,44 +697,56 @@ static void print_megalinker_usage(std::ostream& os) {
 
 } // namespace
 
-static void emit_megalinker_backend(const BackendContext& ctx) {
+static void emit_megalinker_backend(const BackendInput& input) {
+    const AnalyzedProgram& analyzed = input.program;
+    if (!analyzed.module || !analyzed.analysis || !analyzed.optimization) {
+        throw CompileError("Megalinker backend requires full analyzed program input",
+                           SourceLocation());
+    }
+    const Module& module = *analyzed.module;
+    const AnalysisFacts& analysis = *analyzed.analysis;
+
     // Build a header with types only (no function prototypes)
-    AnalysisFacts header_facts = ctx.analysis;
+    AnalysisFacts header_facts = analysis;
     header_facts.reachable_functions.clear();
+    AnalyzedProgram header_input = analyzed;
+    header_input.analysis = &header_facts;
 
     CodeGenerator header_codegen;
     CodegenABI header_abi;
     header_codegen.set_abi(header_abi);
-    CCodegenResult header_result = header_codegen.generate(ctx.module, &ctx.checker, &header_facts, &ctx.optimization);
+    CCodegenResult header_result = header_codegen.generate(module, header_input);
 
-    std::filesystem::path legacy_path = ctx.outputs.dir / (ctx.outputs.stem + ".c");
+    std::filesystem::path legacy_path = input.outputs.dir / (input.outputs.stem + ".c");
     if (std::filesystem::exists(legacy_path)) {
         std::filesystem::remove(legacy_path);
     }
 
-    std::filesystem::path header_path = ctx.outputs.dir / (ctx.outputs.stem + ".h");
-    std::filesystem::path runtime_path = ctx.outputs.dir / (ctx.outputs.stem + "__runtime.c");
-    std::filesystem::path out_dir = ctx.outputs.dir / "megalinker";
+    std::filesystem::path header_path = input.outputs.dir / (input.outputs.stem + ".h");
+    std::filesystem::path runtime_path = input.outputs.dir / (input.outputs.stem + "__runtime.c");
+    std::filesystem::path out_dir = input.outputs.dir / "megalinker";
     std::filesystem::create_directories(out_dir);
 
-    if (ctx.options.verbose) {
+    if (input.options.verbose) {
         std::cout << "Writing header: " << header_path << std::endl;
         std::cout << "Writing runtime: " << runtime_path << std::endl;
     }
 
-    Program* program = ctx.checker.get_program();
-    int entry_instance_id = (program && !program->instances.empty()) ? program->instances.front().id : 0;
-    int saved_instance = ctx.checker.current_instance();
+    const Program* program = analyzed.program;
+    int entry_instance_id = analyzed.entry_instance_id;
+    auto bind_symbol = [&](int instance_id, const void* node) -> Symbol* {
+        if (!analyzed.binding_for || !node) return nullptr;
+        return analyzed.binding_for(instance_id, node);
+    };
 
     // Collect globals
     std::unordered_map<std::string, GlobalInfo> globals;
     if (program) {
         for (const auto& instance : program->instances) {
-            ctx.checker.set_current_instance(instance.id);
             const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
             for (const auto& stmt : module.top_level) {
                 if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
-                Symbol* sym = ctx.checker.binding_for(instance.id, stmt.get());
+                Symbol* sym = bind_symbol(instance.id, stmt.get());
                 if (!sym) continue;
                 int scope_id = scope_id_for_symbol(sym, entry_instance_id);
                 std::string key = symbol_key(stmt->var_name, scope_id);
@@ -739,10 +761,10 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                 }
                 bool force_ram = has_annotation(stmt->annotations, "nonbanked");
                 VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-                auto mit = ctx.analysis.var_mutability.find(sym);
-                if (mit != ctx.analysis.var_mutability.end()) mut = mit->second;
+                auto mit = analysis.var_mutability.find(sym);
+                if (mit != analysis.var_mutability.end()) mut = mit->second;
                 info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
-                if (!ctx.analysis.used_global_vars.count(sym) && !info.is_rom) {
+                if (!analysis.used_global_vars.count(sym) && !info.is_rom) {
                     continue;
                 }
                 if (info.is_rom) {
@@ -752,7 +774,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             }
         }
     } else {
-        for (const auto& stmt : ctx.module.top_level) {
+        for (const auto& stmt : module.top_level) {
             if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
             GlobalInfo info;
             info.decl = stmt;
@@ -779,14 +801,13 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     std::unordered_map<std::string, FunctionInfo> function_map;
     if (program) {
         for (const auto& instance : program->instances) {
-            ctx.checker.set_current_instance(instance.id);
             const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
             for (const auto& stmt : module.top_level) {
                 if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
                 if (stmt->is_external) continue;
-                Symbol* sym = ctx.checker.binding_for(instance.id, stmt.get());
+                Symbol* sym = bind_symbol(instance.id, stmt.get());
                 if (!sym || sym->kind != Symbol::Kind::Function) continue;
-                if (!ctx.analysis.reachable_functions.count(sym)) {
+                if (!analysis.reachable_functions.count(sym)) {
                     continue;
                 }
                 bool has_expr_params = false;
@@ -808,7 +829,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             }
         }
     } else {
-        for (const auto& stmt : ctx.module.top_level) {
+        for (const auto& stmt : module.top_level) {
             if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
             if (stmt->is_external) continue;
             bool has_expr_params = false;
@@ -839,7 +860,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     } build;
 
     size_t caller_limit = caller_limit_from_env();
-    (void)parse_caller_limit_option(ctx.options.backend_options, caller_limit);
+    (void)parse_caller_limit_option(input.options.backend_options, caller_limit);
 
     std::queue<std::string> pending;
 
@@ -931,11 +952,11 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         const Symbol* sym = info.sym;
         if (!decl || !decl->is_exported) continue;
 
-        std::vector<char> reent_keys = available_reent_keys(ctx.analysis, sym);
+        std::vector<char> reent_keys = available_reent_keys(analysis, sym);
         std::string base_ref = decl->ref_params.empty() ? "" : std::string(decl->ref_params.size(), 'M');
 
         for (char reent_key : reent_keys) {
-            std::string ref_key = choose_ref_key(ctx.analysis, sym, decl, base_ref);
+            std::string ref_key = choose_ref_key(analysis, sym, decl, base_ref);
             std::vector<PtrKind> param_kinds;
             for (const auto& param : decl->params) {
                 if (param.is_expression_param) continue;
@@ -964,7 +985,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             if (!call || call->kind != Expr::Kind::Call) continue;
             if (!call->operand || call->operand->kind != Expr::Kind::Identifier) continue;
 
-            Symbol* sym = ctx.checker.binding_for(variant.instance_id, call->operand.get());
+            Symbol* sym = bind_symbol(variant.instance_id, call->operand.get());
             if (!sym || sym->kind != Symbol::Kind::Function || !sym->declaration) continue;
             if (sym->declaration->is_external) continue;
 
@@ -973,9 +994,9 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             auto f_it = function_map.find(callee_key);
             if (f_it == function_map.end()) continue;
 
-            char desired_reent = choose_reent_key(ctx.analysis, sym, variant.reent_key);
+            char desired_reent = choose_reent_key(analysis, sym, variant.reent_key);
             std::string desired_ref = ref_variant_key(call, sym->declaration->ref_params.size());
-            desired_ref = choose_ref_key(ctx.analysis, sym, sym->declaration, desired_ref);
+            desired_ref = choose_ref_key(analysis, sym, sym->declaration, desired_ref);
 
             std::vector<PtrKind> param_kinds;
             size_t arg_idx = 0;
@@ -987,7 +1008,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                 }
                 ExprPtr arg_expr = (arg_idx < call->args.size()) ? call->args[arg_idx] : nullptr;
                 if (is_pointer_like(param.type)) {
-                    param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, ctx.checker, entry_instance_id));
+                    param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, analyzed, entry_instance_id));
                 } else {
                     param_kinds.push_back(PtrKind::Ram);
                 }
@@ -1004,7 +1025,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
                 if (callers.size() > caller_limit) {
                     use_trampoline = true;
                     build.trampoline_signatures.insert(sig_key);
-                    if (ctx.options.verbose) {
+                    if (input.options.verbose) {
                         std::cout << "Megalinker: using nonbanked trampoline for "
                                   << qualified_name(sym->declaration) << " (callers="
                                   << callers.size() << ", limit=" << caller_limit << ")\n";
@@ -1050,7 +1071,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             alters = true;
         }
         if (!alters && variant.decl && variant.decl->body) {
-            alters = expr_uses_rom_symbol(variant.decl->body, globals, ctx.checker,
+            alters = expr_uses_rom_symbol(variant.decl->body, globals, analyzed,
                                           variant.instance_id, entry_instance_id);
         }
         variant.alters_caller_page = alters;
@@ -1073,10 +1094,10 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
         if (!decl) continue;
         std::string name = header_codegen.mangle(decl->var_name);
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
-        std::string mut = mutability_prefix(ctx.analysis, info.sym, decl);
+        std::string mut = mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
             std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
-            std::string size = array_size_str(ctx.checker, decl->var_type, decl->location);
+            std::string size = array_size_str(analyzed, decl->var_type, decl->location);
             header_builder << "extern " << mut << elem_type << " " << name << "[" << size << "];\n";
         } else {
             if (!decl->var_type) {
@@ -1150,7 +1171,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
             return PtrKind::Ram;
         };
         abi.expr_ptr_kind = [&](const ExprPtr& expr) {
-            return infer_ptr_kind(expr, variant, globals, ctx.checker, entry_instance_id);
+            return infer_ptr_kind(expr, variant, globals, analyzed, entry_instance_id);
         };
         abi.symbol_module_id_expr = [&](const std::string& name, int scope_id, char current_page) {
             std::string key = symbol_key(name, scope_id);
@@ -1199,8 +1220,7 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
 
         CodeGenerator gen;
         gen.set_abi(abi);
-        variant.info = gen.generate_single_function(ctx.module, variant.decl, &ctx.checker, &ctx.analysis,
-                                                    &ctx.optimization, abi, variant.instance_id,
+        variant.info = gen.generate_single_function(module, variant.decl, analyzed, abi, variant.instance_id,
                                                     variant.ref_key, variant.reent_key,
                                                     variant.name, variant.id);
 
@@ -1275,14 +1295,16 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     CodegenABI var_abi;
     var_abi.multi_file_globals = true;
     var_codegen.set_abi(var_abi);
-    AnalysisFacts var_facts = ctx.analysis;
+    AnalysisFacts var_facts = analysis;
     for (const auto& kv : globals) {
         const GlobalInfo& info = kv.second;
         if (info.is_rom && info.sym) {
             var_facts.used_global_vars.insert(info.sym);
         }
     }
-    (void)var_codegen.generate(ctx.module, &ctx.checker, &var_facts, &ctx.optimization);
+    AnalyzedProgram var_input = analyzed;
+    var_input.analysis = &var_facts;
+    (void)var_codegen.generate(module, var_input);
 
     std::ostringstream ram_body;
     for (const auto& info : var_codegen.variables()) {
@@ -1410,7 +1432,6 @@ static void emit_megalinker_backend(const BackendContext& ctx) {
     }
 
     write_file(runtime_path.string(), runtime.str());
-    ctx.checker.set_current_instance(saved_instance);
 }
 
 void register_backend_megalinker() {
