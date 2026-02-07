@@ -646,6 +646,34 @@ static bool parse_caller_limit_option(const std::unordered_map<std::string, std:
     return true;
 }
 
+static bool is_valid_symbol_prefix(const std::string& value) {
+    if (value.empty()) return false;
+    unsigned char first = static_cast<unsigned char>(value.front());
+    if (!(std::isalpha(first) || value.front() == '_')) return false;
+    for (size_t i = 1; i < value.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(value[i]);
+        if (!(std::isalnum(c) || value[i] == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool parse_internal_prefix_option(const std::unordered_map<std::string, std::string>& opts,
+                                         std::string& out) {
+    auto it = opts.find("internal_prefix");
+    if (it == opts.end()) {
+        it = opts.find("megalinker.internal_prefix");
+    }
+    if (it == opts.end()) return false;
+    if (!is_valid_symbol_prefix(it->second)) {
+        throw CompileError("Megalinker backend: internal_prefix must be a valid C identifier prefix",
+                           SourceLocation());
+    }
+    out = it->second;
+    return true;
+}
+
 static bool parse_positive_int_option(const std::string& value, std::string& error) {
     if (value.empty()) {
         error = "Megalinker backend: --caller-limit requires a positive integer";
@@ -655,6 +683,14 @@ static bool parse_positive_int_option(const std::string& value, std::string& err
     long parsed = std::strtol(value.c_str(), &end, 10);
     if (!end || *end != '\0' || parsed <= 0) {
         error = "Megalinker backend: --caller-limit requires a positive integer";
+        return false;
+    }
+    return true;
+}
+
+static bool parse_internal_prefix_arg(const std::string& value, std::string& error) {
+    if (!is_valid_symbol_prefix(value)) {
+        error = "Megalinker backend: --internal-prefix requires a valid C identifier prefix";
         return false;
     }
     return true;
@@ -688,11 +724,34 @@ static bool parse_megalinker_option(int argc,
         options.backend_options["caller_limit"] = value;
         return true;
     }
+    if (std::strcmp(arg, "--internal-prefix") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --internal-prefix requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_internal_prefix_arg(value, error)) {
+            return true;
+        }
+        options.backend_options["internal_prefix"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kInternalPrefix = "--internal-prefix=";
+    if (std::strncmp(arg, kInternalPrefix, std::strlen(kInternalPrefix)) == 0) {
+        std::string value = arg + std::strlen(kInternalPrefix);
+        if (!parse_internal_prefix_arg(value, error)) {
+            return true;
+        }
+        options.backend_options["internal_prefix"] = value;
+        return true;
+    }
     return false;
 }
 
 static void print_megalinker_usage(std::ostream& os) {
     os << "  --caller-limit <n>  Caller-variant limit before nonbanked trampoline fallback (default: 10)\n";
+    os << "  --internal-prefix <id>  Prefix for internal generated symbols (default: vx_)\n";
 }
 
 } // namespace
@@ -703,6 +762,13 @@ static void emit_megalinker_backend(const BackendInput& input) {
         throw CompileError("Megalinker backend requires full analyzed program input",
                            SourceLocation());
     }
+    std::string internal_prefix = "vx_";
+    (void)parse_internal_prefix_option(input.options.backend_options, internal_prefix);
+    std::string load_module_a_fn = internal_prefix + "load_module_id_a";
+    std::string load_module_b_fn = internal_prefix + "load_module_id_b";
+    std::string strlen_far_a_fn = internal_prefix + "strlen_far_a";
+    std::string strlen_far_b_fn = internal_prefix + "strlen_far_b";
+
     const Module& module = *analyzed.module;
     const AnalysisFacts& analysis = *analyzed.analysis;
 
@@ -715,6 +781,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     CodeGenerator header_codegen;
     CodegenABI header_abi;
     header_codegen.set_abi(header_abi);
+    header_codegen.set_internal_symbol_prefix(internal_prefix);
     CCodegenResult header_result = header_codegen.generate(module, header_input);
 
     std::filesystem::path legacy_path = input.outputs.dir / (input.outputs.stem + ".c");
@@ -755,7 +822,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
                 info.sym = sym;
                 info.scope_id = scope_id;
                 info.is_pointer_like = is_pointer_like(stmt->var_type);
-                info.c_name = header_codegen.mangle(stmt->var_name);
+                bool is_exported = has_annotation(stmt->annotations, "export");
+                info.c_name = is_exported ? header_codegen.mangle_export(stmt->var_name)
+                                          : header_codegen.mangle(stmt->var_name);
                 if (scope_id >= 0) {
                     info.c_name += "_s" + std::to_string(scope_id);
                 }
@@ -779,7 +848,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
             GlobalInfo info;
             info.decl = stmt;
             info.is_pointer_like = is_pointer_like(stmt->var_type);
-            info.c_name = header_codegen.mangle(stmt->var_name);
+            bool is_exported = has_annotation(stmt->annotations, "export");
+            info.c_name = is_exported ? header_codegen.mangle_export(stmt->var_name)
+                                      : header_codegen.mangle(stmt->var_name);
             bool force_ram = has_annotation(stmt->annotations, "nonbanked");
             VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
             info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
@@ -1092,7 +1163,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
         const GlobalInfo& info = kv.second;
         StmtPtr decl = info.decl;
         if (!decl) continue;
-        std::string name = header_codegen.mangle(decl->var_name);
+        bool is_exported = has_annotation(decl->annotations, "export");
+        std::string name = is_exported ? header_codegen.mangle_export(decl->var_name)
+                                       : header_codegen.mangle(decl->var_name);
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
         std::string mut = mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
@@ -1118,10 +1191,10 @@ static void emit_megalinker_backend(const BackendInput& input) {
     header_builder << "#ifndef VX_FARPTR_ADDR\n";
     header_builder << "#define VX_FARPTR_ADDR(ptr) ((uint16_t)((uint32_t)(ptr) & 0xFFFF))\n";
     header_builder << "#endif\n";
-    header_builder << "void vx_load_module_id_a(uint8_t seg);\n";
-    header_builder << "void vx_load_module_id_b(uint8_t seg);\n";
-    header_builder << "uint16_t vx_strlen_far_a(uint32_t ptr);\n";
-    header_builder << "uint16_t vx_strlen_far_b(uint32_t ptr);\n";
+    header_builder << "void " << load_module_a_fn << "(uint8_t seg);\n";
+    header_builder << "void " << load_module_b_fn << "(uint8_t seg);\n";
+    header_builder << "uint16_t " << strlen_far_a_fn << "(uint32_t ptr);\n";
+    header_builder << "uint16_t " << strlen_far_b_fn << "(uint32_t ptr);\n";
 
     // Segment declarations for all modules
     std::unordered_set<std::string> module_names;
@@ -1145,13 +1218,17 @@ static void emit_megalinker_backend(const BackendInput& input) {
         CodegenABI abi;
         abi.lower_aggregates = true;
         abi.multi_file_globals = true;
+        abi.load_module_a_fn = load_module_a_fn;
+        abi.load_module_b_fn = load_module_b_fn;
+        abi.strlen_far_a_fn = strlen_far_a_fn;
+        abi.strlen_far_b_fn = strlen_far_b_fn;
         if (variant.needs_restore) {
             auto cit = build.variants.find(variant.caller_id);
             if (cit != build.variants.end()) {
                 char restore_page = cit->second.page;
-                abi.return_prefix = std::string("vx_load_module_id_") +
-                                    (restore_page == 'A' ? "a" : "b") +
-                                    "(" + segment_expr(restore_page, cit->second.module_name) + ");";
+                std::string restore_fn = (restore_page == 'A') ? load_module_a_fn : load_module_b_fn;
+                abi.return_prefix = restore_fn + "(" +
+                                    segment_expr(restore_page, cit->second.module_name) + ");";
             }
         }
         abi.func_page = [&](const std::string&) { return variant.page; };
@@ -1220,6 +1297,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
 
         CodeGenerator gen;
         gen.set_abi(abi);
+        gen.set_internal_symbol_prefix(internal_prefix);
         variant.info = gen.generate_single_function(module, variant.decl, analyzed, abi, variant.instance_id,
                                                     variant.ref_key, variant.reent_key,
                                                     variant.name, variant.id);
@@ -1269,7 +1347,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         }
         if (!entry) continue;
 
-        std::string wrapper_name = header_codegen.mangle(qualified_name(decl));
+        std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
         std::string proto = variant_prototypes[entry->id];
         if (!proto.empty()) {
             std::string replaced = replace_identifier_token(proto, entry->c_name, wrapper_name);
@@ -1294,7 +1372,12 @@ static void emit_megalinker_backend(const BackendInput& input) {
     CodeGenerator var_codegen;
     CodegenABI var_abi;
     var_abi.multi_file_globals = true;
+    var_abi.load_module_a_fn = load_module_a_fn;
+    var_abi.load_module_b_fn = load_module_b_fn;
+    var_abi.strlen_far_a_fn = strlen_far_a_fn;
+    var_abi.strlen_far_b_fn = strlen_far_b_fn;
     var_codegen.set_abi(var_abi);
+    var_codegen.set_internal_symbol_prefix(internal_prefix);
     AnalysisFacts var_facts = analysis;
     for (const auto& kv : globals) {
         const GlobalInfo& info = kv.second;
@@ -1332,10 +1415,14 @@ static void emit_megalinker_backend(const BackendInput& input) {
     runtime << "#include <stdint.h>\n";
     runtime << "extern volatile uint8_t __ML_address_a;\n";
     runtime << "extern volatile uint8_t __ML_address_b;\n";
-    runtime << "void vx_load_module_id_a(uint8_t seg) { __ML_address_a = seg; }\n";
-    runtime << "void vx_load_module_id_b(uint8_t seg) { __ML_address_b = seg; }\n";
-    runtime << "uint16_t vx_strlen_far_a(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); vx_load_module_id_a(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
-    runtime << "uint16_t vx_strlen_far_b(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); vx_load_module_id_b(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
+    runtime << "void " << load_module_a_fn << "(uint8_t seg) { __ML_address_a = seg; }\n";
+    runtime << "void " << load_module_b_fn << "(uint8_t seg) { __ML_address_b = seg; }\n";
+    runtime << "uint16_t " << strlen_far_a_fn << "(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); "
+            << load_module_a_fn
+            << "(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
+    runtime << "uint16_t " << strlen_far_b_fn << "(uint32_t ptr) { uint8_t seg = VX_FARPTR_MOD(ptr); "
+            << load_module_b_fn
+            << "(seg); const char* s = (const char*)VX_FARPTR_ADDR(ptr); uint16_t n = 0; while (s[n]) n++; return n; }\n";
 
     // Trampoline wrappers
     for (const auto& kv : build.trampoline_variants) {
@@ -1362,7 +1449,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         runtime << sig << " {\n";
         runtime << "  uint8_t old_a = __ML_address_a;\n";
         runtime << "  uint8_t old_b = __ML_address_b;\n";
-        runtime << "  vx_load_module_id_" << (target.page == 'A' ? "a" : "b") << "("
+        runtime << "  " << (target.page == 'A' ? load_module_a_fn : load_module_b_fn) << "("
                 << segment_expr(target.page, target.module_name) << ");\n";
         if (returns_void) {
             runtime << "  " << target.c_name << "(" << args << ");\n";
@@ -1394,7 +1481,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         }
         if (!entry) continue;
 
-        std::string wrapper_name = header_codegen.mangle(qualified_name(decl));
+        std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
         std::string proto = variant_prototypes[entry->id];
         if (proto.empty()) continue;
 
@@ -1416,7 +1503,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
 
         runtime << sig;
         runtime << "  ";
-        runtime << "vx_load_module_id_" << (entry->page == 'A' ? "a" : "b") << "(";
+        runtime << (entry->page == 'A' ? load_module_a_fn : load_module_b_fn) << "(";
         runtime << segment_expr(entry->page, entry->module_name) << ");\n";
         bool returns_void = (entry->decl->return_types.empty() && !entry->decl->return_type);
         if (returns_void && entry->decl->body && entry->decl->body->type) returns_void = false;

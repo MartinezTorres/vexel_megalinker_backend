@@ -9,7 +9,9 @@ fi
 
 cleanup() {
   rm -f "$SCRIPT_DIR/out.c" "$SCRIPT_DIR/out.h" "$SCRIPT_DIR/out__runtime.c" \
-    "$SCRIPT_DIR/out.lowered.vx" "$SCRIPT_DIR/out.analysis.txt"
+    "$SCRIPT_DIR/out.lowered.vx" "$SCRIPT_DIR/out.analysis.txt" \
+    "$SCRIPT_DIR/pref.c" "$SCRIPT_DIR/pref.h" "$SCRIPT_DIR/pref__runtime.c" \
+    "$SCRIPT_DIR/pref.lowered.vx" "$SCRIPT_DIR/pref.analysis.txt"
   rm -rf "$SCRIPT_DIR/megalinker"
 }
 trap cleanup EXIT
@@ -74,6 +76,32 @@ if rg -q "if \\(!?seg\\)" out__runtime.c; then
 fi
 if ! rg -q "__ML_SEGMENT_A_" out__runtime.c; then
   echo "missing segment A paging references"
+  exit 1
+fi
+if ! rg --no-ignore -q "^// VEXEL: kind=function" megalinker; then
+  echo "missing function trait comments"
+  exit 1
+fi
+if rg -q "VX_REENTRANT|VX_NON_REENTRANT|VX_ENTRYPOINT|VX_INLINE|VX_NOINLINE|VX_PURE|VX_NO_GLOBAL_WRITE|VX_REF_MASK" out.h out__runtime.c megalinker/*.c; then
+  echo "unexpected legacy function annotation macros"
+  exit 1
+fi
+
+if ! "$ROOT/build/vexel-megalinker" --internal-prefix mltest_ -o pref input.vx \
+  >/tmp/megalinker_compile_pref.out 2>/tmp/megalinker_compile_pref.err; then
+  cat /tmp/megalinker_compile_pref.out /tmp/megalinker_compile_pref.err
+  exit 1
+fi
+if ! rg -q "void mltest_load_module_id_a\\(uint8_t seg\\)" pref__runtime.c; then
+  echo "missing prefixed runtime helper"
+  exit 1
+fi
+if ! rg -q "^int32_t vx_entry_add\\(" pref__runtime.c; then
+  echo "missing stable exported symbol with internal prefix option"
+  exit 1
+fi
+if rg -q "^int32_t mltest_entry_add\\(" pref__runtime.c; then
+  echo "internal prefix leaked into exported symbol"
   exit 1
 fi
 

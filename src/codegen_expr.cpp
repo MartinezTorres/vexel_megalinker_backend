@@ -166,7 +166,7 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
                 if (abi.symbol_load_expr) {
                     std::string load_expr = abi.symbol_load_expr(expr->name, scope_id, current_bank_page);
                     if (!load_expr.empty()) {
-                        std::string load_fn = (current_bank_page == 'A') ? "vx_load_module_id_b" : "vx_load_module_id_a";
+                        std::string load_fn = load_module_fn((current_bank_page == 'A') ? 'B' : 'A');
                         emit(load_fn + "(" + load_expr + ");");
                     }
                 }
@@ -644,7 +644,7 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
     }
 
     if (!target.module_id_expr.empty()) {
-        std::string load_fn = (target.page == 'A') ? "vx_load_module_id_a" : "vx_load_module_id_b";
+        std::string load_fn = load_module_fn(target.page);
         emit(load_fn + "(" + target.module_id_expr + ");");
     }
 
@@ -703,7 +703,7 @@ std::string CodeGenerator::gen_index(ExprPtr expr) {
             emit(temp + " = " + arr + ";");
             ptr_expr = temp;
         }
-        std::string load_fn = (current_bank_page == 'A') ? "vx_load_module_id_b" : "vx_load_module_id_a";
+        std::string load_fn = load_module_fn((current_bank_page == 'A') ? 'B' : 'A');
         emit(load_fn + "(VX_FARPTR_MOD(" + ptr_expr + "));");
         std::string elem_type = require_type(expr->type,
                                              expr->location,
@@ -1202,7 +1202,7 @@ std::string CodeGenerator::gen_length(ExprPtr expr) {
                 operand = gen_expr(expr->operand);
             }
             if (ptr_kind_for_expr(expr->operand) == PtrKind::Far) {
-                std::string fn = (current_bank_page == 'A') ? "vx_strlen_far_b" : "vx_strlen_far_a";
+                std::string fn = strlen_far_fn((current_bank_page == 'A') ? 'B' : 'A');
                 return fn + "(" + operand + ")";
             }
             return "strlen(" + operand + ")";

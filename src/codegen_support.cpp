@@ -85,12 +85,21 @@ std::string CodeGenerator::gen_type(TypePtr type) {
 }
 
 std::string CodeGenerator::mangle_name(const std::string& name) {
+    return mangle_name_with_prefix(name, internal_symbol_prefix);
+}
+
+std::string CodeGenerator::mangle_export_name(const std::string& name) {
+    return mangle_name_with_prefix(name, "vx_");
+}
+
+std::string CodeGenerator::mangle_name_with_prefix(const std::string& name,
+                                                   const std::string& prefix) const {
     // Special case: main function doesn't get mangled
     if (name == "main") {
         return "main";
     }
 
-    std::string result = "vx_";
+    std::string result = prefix.empty() ? "vx_" : prefix;
     auto append_encoded = [&](unsigned char c) {
         if (std::isalnum(c) || c == '_') {
             result.push_back(static_cast<char>(c));
@@ -159,6 +168,24 @@ std::string CodeGenerator::nonreentrant_arg_slot_name(const std::string& c_name,
 
 std::string CodeGenerator::nonreentrant_ret_slot_name(const std::string& c_name) const {
     return "__vx_nr_ret_" + c_name;
+}
+
+std::string CodeGenerator::load_module_fn(char page) const {
+    if (page == 'A') {
+        if (!abi.load_module_a_fn.empty()) return abi.load_module_a_fn;
+        return "vx_load_module_id_a";
+    }
+    if (!abi.load_module_b_fn.empty()) return abi.load_module_b_fn;
+    return "vx_load_module_id_b";
+}
+
+std::string CodeGenerator::strlen_far_fn(char page) const {
+    if (page == 'A') {
+        if (!abi.strlen_far_a_fn.empty()) return abi.strlen_far_a_fn;
+        return "vx_strlen_far_a";
+    }
+    if (!abi.strlen_far_b_fn.empty()) return abi.strlen_far_b_fn;
+    return "vx_strlen_far_b";
 }
 
 void CodeGenerator::emit_return_stmt(const std::string& expr) {

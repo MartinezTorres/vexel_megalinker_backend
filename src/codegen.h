@@ -48,6 +48,10 @@ struct CodegenABI {
     bool lower_aggregates = false;
     bool multi_file_globals = false;
     std::string return_prefix;
+    std::string load_module_a_fn;
+    std::string load_module_b_fn;
+    std::string strlen_far_a_fn;
+    std::string strlen_far_b_fn;
     std::function<PtrKind(const ExprPtr&)> expr_ptr_kind;
     std::function<PtrKind(const std::string& name, int scope_id)> symbol_ptr_kind;
     std::function<std::string(const std::string& func_key, char page)> func_module_id_expr;
@@ -115,6 +119,10 @@ public:
     const std::vector<GeneratedVarInfo>& variables() const { return generated_vars; }
     std::string type_to_c(TypePtr type) { return gen_type(type); }
     std::string mangle(const std::string& name) { return mangle_name(name); }
+    std::string mangle_export(const std::string& name) { return mangle_export_name(name); }
+    void set_internal_symbol_prefix(const std::string& prefix) {
+        internal_symbol_prefix = prefix.empty() ? "vx_" : prefix;
+    }
 private:
     std::unordered_set<std::string> current_ref_params;  // Track reference parameters in current function
     std::unordered_map<std::string, std::vector<TypePtr>> tuple_types;  // Track tuple types: name -> element types
@@ -129,6 +137,7 @@ private:
     std::string aggregate_out_param;
     std::string aggregate_out_type;
     std::unordered_set<std::string> current_aggregate_params;
+    std::string internal_symbol_prefix = "vx_";
 
     void gen_module(const Module& mod);
     void gen_stmt(StmtPtr stmt);
@@ -180,6 +189,8 @@ private:
     std::string require_type(TypePtr type, const SourceLocation& loc, const std::string& context);
     std::string gen_type(TypePtr type);
     std::string mangle_name(const std::string& name);
+    std::string mangle_export_name(const std::string& name);
+    std::string mangle_name_with_prefix(const std::string& name, const std::string& prefix) const;
     std::string fresh_temp();
     void release_temp(const std::string& temp);
 
@@ -188,6 +199,8 @@ private:
     bool use_nonreentrant_frame_abi(bool is_exported) const;
     std::string nonreentrant_arg_slot_name(const std::string& c_name, size_t index) const;
     std::string nonreentrant_ret_slot_name(const std::string& c_name) const;
+    std::string load_module_fn(char page) const;
+    std::string strlen_far_fn(char page) const;
     std::string ensure_comparator(TypePtr type);
     int64_t resolve_array_length(TypePtr type, const SourceLocation& loc);
     void emit_return_stmt(const std::string& expr);

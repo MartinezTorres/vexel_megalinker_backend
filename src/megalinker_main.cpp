@@ -18,6 +18,8 @@ static void print_usage(const char* prog) {
     std::cout << "  -L           Emit lowered Vexel subset alongside backend output\n";
     std::cout << "  --emit-analysis Emit analysis report alongside backend output\n";
     std::cout << "  --allow-process Enable process expressions (executes host commands; disabled by default)\n";
+    std::cout << "  --caller-limit <n> Caller-variant limit before trampoline fallback\n";
+    std::cout << "  --internal-prefix <id> Prefix for internal generated symbols\n";
     std::cout << "  --backend-opt <k=v> Backend-specific option (repeatable)\n";
     std::cout << "  -v           Verbose output\n";
     std::cout << "  -h           Show this help\n";
@@ -42,6 +44,28 @@ int main(int argc, char** argv) {
             opts.emit_analysis = true;
         } else if (std::strcmp(argv[i], "--allow-process") == 0) {
             opts.allow_process = true;
+        } else if (std::strcmp(argv[i], "--caller-limit") == 0 || std::strncmp(argv[i], "--caller-limit=", 15) == 0) {
+            const char* value = nullptr;
+            if (std::strncmp(argv[i], "--caller-limit=", 15) == 0) {
+                value = argv[i] + 15;
+            } else if (i + 1 < argc) {
+                value = argv[++i];
+            } else {
+                std::cerr << "Error: --caller-limit requires an argument\n";
+                return 1;
+            }
+            opts.backend_options["caller_limit"] = value;
+        } else if (std::strcmp(argv[i], "--internal-prefix") == 0 || std::strncmp(argv[i], "--internal-prefix=", 18) == 0) {
+            const char* value = nullptr;
+            if (std::strncmp(argv[i], "--internal-prefix=", 18) == 0) {
+                value = argv[i] + 18;
+            } else if (i + 1 < argc) {
+                value = argv[++i];
+            } else {
+                std::cerr << "Error: --internal-prefix requires an argument\n";
+                return 1;
+            }
+            opts.backend_options["internal_prefix"] = value;
         } else if (std::strcmp(argv[i], "--backend-opt") == 0 || std::strncmp(argv[i], "--backend-opt=", 14) == 0) {
             const char* opt = nullptr;
             if (std::strncmp(argv[i], "--backend-opt=", 14) == 0) {

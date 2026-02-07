@@ -20,6 +20,10 @@ GM:#i32;
   callee(2)
 }
 
+&^entry_add(n:#i32) -> #i32 {
+  callee(n)
+}
+
 &^main() -> #i32 {
   GM = 0;
   caller1() + caller2()
