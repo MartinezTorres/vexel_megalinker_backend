@@ -44,8 +44,8 @@ static BackendAnalysisRequirements megalinker_analysis_requirements(const Compil
                                                                     std::string&) {
     BackendAnalysisRequirements req;
     req.required_passes = kAllAnalysisPasses;
-    req.default_entry_reentrancy = 'N';
-    req.default_exit_reentrancy = 'N';
+    req.default_entry_reentrancy = 'R';
+    req.default_exit_reentrancy = 'R';
     return req;
 }
 
@@ -54,18 +54,11 @@ static ReentrancyMode megalinker_boundary_reentrancy_mode(const Symbol& sym,
                                                           const Compiler::Options&,
                                                           std::string& error) {
     (void)boundary;
+    (void)error;
     if (!sym.declaration) {
         return ReentrancyMode::Default;
     }
-    bool is_reentrant = has_annotation(sym.declaration->annotations, "reentrant");
     bool is_nonreentrant = has_annotation(sym.declaration->annotations, "nonreentrant");
-    if (is_reentrant && is_nonreentrant) {
-        std::string target = (sym.is_external ? "external" : "entry");
-        error = "Conflicting annotations: [[reentrant]] and [[nonreentrant]] on " +
-                target + " function '" + sym.name + "'";
-        return ReentrancyMode::Default;
-    }
-    if (is_reentrant) return ReentrancyMode::Reentrant;
     if (is_nonreentrant) return ReentrancyMode::NonReentrant;
     return ReentrancyMode::Default;
 }

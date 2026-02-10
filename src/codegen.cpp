@@ -75,21 +75,12 @@ static std::string render_function_traits_comment(bool is_external,
                                                   const std::string& ref_key,
                                                   bool is_pure,
                                                   bool no_global_write,
-                                                  bool has_inline,
-                                                  bool has_noinline,
                                                   bool frame_abi) {
     std::ostringstream os;
     os << "// VEXEL: kind=" << (is_external ? "extern" : "function");
     os << " export=" << (is_exported ? "yes" : "no");
     os << " reentrant=" << ((reent_key == 'R') ? "yes" : "no");
     os << " ref_mask=" << (ref_key.empty() ? "-" : ref_key);
-    if (has_noinline) {
-        os << " inline=noinline";
-    } else if (has_inline) {
-        os << " inline=inline";
-    } else {
-        os << " inline=default";
-    }
     os << " pure=" << (is_pure ? "yes" : "no");
     os << " no_global_write=" << (no_global_write ? "yes" : "no");
     os << " abi=" << (frame_abi ? "nonreentrant_frame" : "native");
@@ -496,19 +487,9 @@ void CodeGenerator::gen_module(const Module& mod) {
                 if (!stmt->type_namespace.empty()) {
                     func_name = stmt->type_namespace + "::" + stmt->func_name;
                 }
-                bool is_reentrant = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                                [](const Annotation& a) { return a.name == "reentrant"; });
                 bool is_nonreentrant = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
                                                    [](const Annotation& a) { return a.name == "nonreentrant"; });
-                if (is_reentrant && is_nonreentrant) {
-                    throw CompileError("Conflicting annotations: [[reentrant]] and [[nonreentrant]] on external function '" +
-                                       stmt->func_name + "'", stmt->location);
-                }
-                char reent_key = is_reentrant ? 'R' : 'N';
-                bool has_inline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                              [](const Annotation& a) { return a.name == "inline"; });
-                bool has_noinline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                                [](const Annotation& a) { return a.name == "noinline"; });
+                char reent_key = is_nonreentrant ? 'N' : 'R';
                 std::string ref_key(stmt->ref_params.size(), 'M');
                 std::string ann_comment = render_annotation_comment(stmt->annotations);
                 if (!ann_comment.empty()) emit_header(ann_comment);
@@ -518,8 +499,6 @@ void CodeGenerator::gen_module(const Module& mod) {
                                                           ref_key,
                                                           false,
                                                           false,
-                                                          has_inline,
-                                                          has_noinline,
                                                           false));
                 std::string ret_type = stmt->return_type ? gen_type(stmt->return_type) : "void";
                 emit_header(ret_type + " " + mangle_name(func_name) + "(");
@@ -594,10 +573,6 @@ void CodeGenerator::gen_module(const Module& mod) {
             std::string func_key = func_key_for(sym);
 
             std::string storage = stmt->is_exported ? "" : "static ";
-            bool has_inline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                          [](const Annotation& a) { return a.name == "inline"; });
-            bool has_noinline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                            [](const Annotation& a) { return a.name == "noinline"; });
             bool is_pure = false;
             bool no_global_write = false;
             {
@@ -678,8 +653,6 @@ void CodeGenerator::gen_module(const Module& mod) {
                                                               ref_key,
                                                               is_pure,
                                                               no_global_write,
-                                                              has_inline,
-                                                              has_noinline,
                                                               frame_abi_variant));
 
                     if (frame_abi_variant) {
@@ -975,10 +948,6 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
         current_module_id_expr = "0";
     }
 
-    bool has_inline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                  [](const Annotation& a) { return a.name == "inline"; });
-    bool has_noinline = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                                    [](const Annotation& a) { return a.name == "noinline"; });
     bool is_pure = false;
     bool no_global_write = false;
     {
@@ -1036,17 +1005,6 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
 
     // Internal functions are static, exported functions are public
     std::string storage = stmt->is_exported ? "" : "static ";
-    std::string attr;
-    if (stmt->is_exported) {
-        if (std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                        [](const Annotation& a) { return a.name == "hot"; })) {
-            attr = "__attribute__((hot)) ";
-        }
-        if (std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
-                        [](const Annotation& a) { return a.name == "cold"; })) {
-            attr = "__attribute__((cold)) ";
-        }
-    }
 
     // Handle tuple return types
     std::string ret_type;
@@ -1187,13 +1145,11 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
                                         ref_key,
                                         is_pure,
                                         no_global_write,
-                                        has_inline,
-                                        has_noinline,
                                         current_nonreentrant_frame_abi));
     if (current_nonreentrant_frame_abi) {
-        emit(storage + attr + "void " + codegen_name + "(void) {");
+        emit(storage + "void " + codegen_name + "(void) {");
     } else {
-        emit(storage + attr + ret_type + " " + codegen_name + "(");
+        emit(storage + ret_type + " " + codegen_name + "(");
 
         bool first_param = true;
         if (current_returns_aggregate) {

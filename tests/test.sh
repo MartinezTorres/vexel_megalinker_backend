@@ -16,19 +16,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! VEXEL_ROOT_DIR="$ROOT" make -s -C "$ROOT" frontend >/tmp/frontend_build.out 2>/tmp/frontend_build.err; then
-  cat /tmp/frontend_build.out /tmp/frontend_build.err
-  exit 1
-fi
-
-if ! VEXEL_ROOT_DIR="$ROOT" make -s -C "$ROOT/backends/ext/megalinker" >/tmp/megalinker_build.out 2>/tmp/megalinker_build.err; then
-  cat /tmp/megalinker_build.out /tmp/megalinker_build.err
+if ! VEXEL_ROOT_DIR="$ROOT" make -s -C "$ROOT" driver >/tmp/driver_build.out 2>/tmp/driver_build.err; then
+  cat /tmp/driver_build.out /tmp/driver_build.err
   exit 1
 fi
 
 pushd "$SCRIPT_DIR" >/dev/null
 
-if ! "$ROOT/build/vexel-megalinker" --backend-opt caller_limit=1 -o out input.vx \
+if ! "$ROOT/build/vexel" -b megalinker --backend-opt caller_limit=1 -o out input.vx \
   >/tmp/megalinker_compile.out 2>/tmp/megalinker_compile.err; then
   cat /tmp/megalinker_compile.out /tmp/megalinker_compile.err
   exit 1
@@ -87,7 +82,7 @@ if rg -q "VX_REENTRANT|VX_NON_REENTRANT|VX_ENTRYPOINT|VX_INLINE|VX_NOINLINE|VX_P
   exit 1
 fi
 
-if ! "$ROOT/build/vexel-megalinker" --internal-prefix mltest_ -o pref input.vx \
+if ! "$ROOT/build/vexel" -b megalinker --internal-prefix mltest_ -o pref input.vx \
   >/tmp/megalinker_compile_pref.out 2>/tmp/megalinker_compile_pref.err; then
   cat /tmp/megalinker_compile_pref.out /tmp/megalinker_compile_pref.err
   exit 1

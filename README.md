@@ -10,11 +10,10 @@ VEXEL_ROOT=../../.. make
 
 Artifacts:
 - `$(VEXEL_BUILD)/backends/megalinker/libvexel-megalinker.a`
-- `$(VEXEL_BUILD)/vexel-megalinker`
 
 ## Usage
 ```
-$(VEXEL_BUILD)/vexel-megalinker -o out path/to/main.vx
+$(VEXEL_BUILD)/vexel -b megalinker -o out path/to/main.vx
 ```
 
 Outputs:
@@ -34,6 +33,16 @@ Outputs:
   - `--internal-prefix <id>` when using the unified `vexel` driver
   - `--backend-opt internal_prefix=<id>` from either driver
   - Exported entrypoints/exports keep their public symbol names; only internal generated symbols are prefixed.
+
+## Reentrancy Contract (Key Behavior)
+- This backend explicitly recognizes `[[nonreentrant]]` on ABI-boundary functions (`&^` exports and `&!` externals).
+- Default boundary mode is reentrant for both entry and exit boundaries (`R/R`).
+- `[[nonreentrant]]` overrides the boundary mode for the annotated entry/exit symbol.
+- Internal call variants are selected from frontend-provided reentrancy analysis; backend codegen does not recompute the graph.
+- Internal non-reentrant variants may use frame ABI; ABI boundaries remain native C ABI.
+
+## Global Placement Hint
+- This backend recognizes `[[nonbanked]]` on global variables to force RAM placement (skip ROM banking).
 
 ## Include path
 Generated C files include `megalinker.h`. Make sure your C build includes:
