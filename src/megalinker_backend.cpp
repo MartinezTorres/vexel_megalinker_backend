@@ -40,6 +40,36 @@ static bool has_annotation(const std::vector<Annotation>& anns, const std::strin
     return std::any_of(anns.begin(), anns.end(), [&](const Annotation& ann) { return ann.name == name; });
 }
 
+static BackendAnalysisRequirements megalinker_analysis_requirements(const Compiler::Options&,
+                                                                    std::string&) {
+    BackendAnalysisRequirements req;
+    req.required_passes = kAllAnalysisPasses;
+    req.default_entry_reentrancy = 'N';
+    req.default_exit_reentrancy = 'N';
+    return req;
+}
+
+static ReentrancyMode megalinker_boundary_reentrancy_mode(const Symbol& sym,
+                                                          ReentrancyBoundaryKind boundary,
+                                                          const Compiler::Options&,
+                                                          std::string& error) {
+    (void)boundary;
+    if (!sym.declaration) {
+        return ReentrancyMode::Default;
+    }
+    bool is_reentrant = has_annotation(sym.declaration->annotations, "reentrant");
+    bool is_nonreentrant = has_annotation(sym.declaration->annotations, "nonreentrant");
+    if (is_reentrant && is_nonreentrant) {
+        std::string target = (sym.is_external ? "external" : "entry");
+        error = "Conflicting annotations: [[reentrant]] and [[nonreentrant]] on " +
+                target + " function '" + sym.name + "'";
+        return ReentrancyMode::Default;
+    }
+    if (is_reentrant) return ReentrancyMode::Reentrant;
+    if (is_nonreentrant) return ReentrancyMode::NonReentrant;
+    return ReentrancyMode::Default;
+}
+
 static std::string qualified_name(const StmtPtr& stmt) {
     if (!stmt) return "";
     if (!stmt->type_namespace.empty()) {
@@ -331,8 +361,6 @@ static std::string mutability_prefix(const AnalysisFacts& facts, const Symbol* s
     switch (kind) {
         case VarMutability::Mutable:
             return "VX_MUTABLE ";
-        case VarMutability::NonMutableRuntime:
-            return "VX_NON_MUTABLE ";
         case VarMutability::Constexpr:
             return "VX_CONSTEXPR ";
         default:
@@ -822,9 +850,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
                 info.sym = sym;
                 info.scope_id = scope_id;
                 info.is_pointer_like = is_pointer_like(stmt->var_type);
-                bool is_exported = has_annotation(stmt->annotations, "export");
-                info.c_name = is_exported ? header_codegen.mangle_export(stmt->var_name)
-                                          : header_codegen.mangle(stmt->var_name);
+                info.c_name = header_codegen.mangle(stmt->var_name);
                 if (scope_id >= 0) {
                     info.c_name += "_s" + std::to_string(scope_id);
                 }
@@ -848,9 +874,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
             GlobalInfo info;
             info.decl = stmt;
             info.is_pointer_like = is_pointer_like(stmt->var_type);
-            bool is_exported = has_annotation(stmt->annotations, "export");
-            info.c_name = is_exported ? header_codegen.mangle_export(stmt->var_name)
-                                      : header_codegen.mangle(stmt->var_name);
+            info.c_name = header_codegen.mangle(stmt->var_name);
             bool force_ram = has_annotation(stmt->annotations, "nonbanked");
             VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
             info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
@@ -1163,9 +1187,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         const GlobalInfo& info = kv.second;
         StmtPtr decl = info.decl;
         if (!decl) continue;
-        bool is_exported = has_annotation(decl->annotations, "export");
-        std::string name = is_exported ? header_codegen.mangle_export(decl->var_name)
-                                       : header_codegen.mangle(decl->var_name);
+        std::string name = header_codegen.mangle(decl->var_name);
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
         std::string mut = mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
@@ -1527,6 +1549,8 @@ void register_backend_megalinker() {
     backend.info.description = "Megalinker banked backend";
     backend.info.version = "v0.3.0";
     backend.emit = emit_megalinker_backend;
+    backend.analysis_requirements = megalinker_analysis_requirements;
+    backend.boundary_reentrancy_mode = megalinker_boundary_reentrancy_mode;
     backend.parse_option = parse_megalinker_option;
     backend.print_usage = print_megalinker_usage;
     (void)register_backend(backend);

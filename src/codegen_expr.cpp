@@ -1055,16 +1055,20 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
     // Use the flag set by the typechecker to determine if this creates a new variable
     if (expr->creates_new_variable) {
         TypePtr var_type = expr->left->type ? expr->left->type : expr->type;
+        Symbol* decl_sym = binding_for(expr->left);
+        if ((!var_type || var_type->kind != Type::Kind::Array) &&
+            decl_sym && decl_sym->type && decl_sym->type->kind == Type::Kind::Array) {
+            var_type = decl_sym->type;
+        }
         std::string var_type_str = gen_type(var_type);
         if (var_type && is_pointer_like(var_type) && var_type->kind != Type::Kind::Array) {
-            Symbol* sym = binding_for(expr->left);
-            if (ptr_kind_for_symbol(sym) == PtrKind::Far) {
+            if (ptr_kind_for_symbol(decl_sym) == PtrKind::Far) {
                 var_type_str = "uint32_t";
             }
         }
         std::string var_name = mangle_name(expr->left->name);
-        if (Symbol* sym = binding_for(expr->left)) {
-            var_name += instance_suffix(sym);
+        if (decl_sym) {
+            var_name += instance_suffix(decl_sym);
         }
 
         // For array declarations, we need to handle the literal specially
@@ -1086,7 +1090,44 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
             emit("};");
 
             std::string temp = fresh_temp();
-            emit(storage_prefix() + std::string("int ") + temp + " = 0;");
+            if (!declared_temps.count(temp)) {
+                emit(storage_prefix() + std::string("int ") + temp + " = 0;");
+                declared_temps.insert(temp);
+            } else {
+                emit(temp + " = 0;");
+            }
+            return temp;
+        }
+
+        if (var_type && var_type->kind == Type::Kind::Array) {
+            std::string elem_type = require_type(var_type->element_type,
+                                                 expr->location,
+                                                 "array declaration element type");
+            std::string size_str = std::to_string(resolve_array_length(var_type, expr->location));
+            emit(elem_type + " " + var_name + "[" + size_str + "];");
+
+            std::string rhs;
+            {
+                VoidCallGuard guard(*this, false);
+                rhs = gen_expr(expr->right);
+            }
+
+            std::string idx = fresh_temp();
+            if (!declared_temps.count(idx)) {
+                emit(storage_prefix() + std::string("int ") + idx + ";");
+                declared_temps.insert(idx);
+            }
+            emit("for (" + idx + " = 0; " + idx + " < " + size_str + "; ++" + idx + ") {");
+            emit(var_name + "[" + idx + "] = " + rhs + "[" + idx + "];");
+            emit("}");
+
+            std::string temp = fresh_temp();
+            if (!declared_temps.count(temp)) {
+                emit(storage_prefix() + std::string("int ") + temp + " = 0;");
+                declared_temps.insert(temp);
+            } else {
+                emit(temp + " = 0;");
+            }
             return temp;
         }
 
@@ -1102,7 +1143,12 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         }
         std::string temp = fresh_temp();
         emit(var_type_str + " " + var_name + " = " + rhs + ";");
-        emit(storage_prefix() + std::string("int ") + temp + " = 0;"); // Assignment as expression returns dummy value
+        if (!declared_temps.count(temp)) {
+            emit(storage_prefix() + std::string("int ") + temp + " = 0;"); // Assignment as expression returns dummy value
+            declared_temps.insert(temp);
+        } else {
+            emit(temp + " = 0;");
+        }
         return temp;
     }
 
@@ -1123,6 +1169,36 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
         release_temp(rhs);
     }
+
+    TypePtr lhs_type = expr->left ? expr->left->type : nullptr;
+    if ((!lhs_type || lhs_type->kind != Type::Kind::Array) &&
+        expr->left && expr->left->kind == Expr::Kind::Identifier) {
+        if (Symbol* lhs_sym = binding_for(expr->left)) {
+            if (lhs_sym->type && lhs_sym->type->kind == Type::Kind::Array) {
+                lhs_type = lhs_sym->type;
+            }
+        }
+    }
+    if (lhs_type && lhs_type->kind == Type::Kind::Array) {
+        std::string size_str = std::to_string(resolve_array_length(lhs_type, expr->location));
+        std::string idx = fresh_temp();
+        if (!declared_temps.count(idx)) {
+            emit(storage_prefix() + std::string("int ") + idx + ";");
+            declared_temps.insert(idx);
+        }
+        emit("for (" + idx + " = 0; " + idx + " < " + size_str + "; ++" + idx + ") {");
+        emit(lhs + "[" + idx + "] = " + rhs + "[" + idx + "];");
+        emit("}");
+        std::string temp = fresh_temp();
+        if (!declared_temps.count(temp)) {
+            emit(storage_prefix() + std::string("int ") + temp + " = 0;");
+            declared_temps.insert(temp);
+        } else {
+            emit(temp + " = 0;");
+        }
+        return temp;
+    }
+
     return "(" + lhs + " = " + rhs + ")";
 }
 
@@ -1153,10 +1229,12 @@ std::string CodeGenerator::gen_range(ExprPtr expr) {
     }
 
     std::string temp = fresh_temp();
-    std::string elem_type = "int32_t";
-    if (expr->type && expr->type->kind == Type::Kind::Array && expr->type->element_type) {
-        elem_type = gen_type(expr->type->element_type);
+    if (!expr->type || expr->type->kind != Type::Kind::Array || !expr->type->element_type) {
+        throw CompileError("Internal error: range expression missing element type", expr->location);
     }
+    std::string elem_type = require_type(expr->type->element_type,
+                                         expr->location,
+                                         "range element type");
 
     int64_t size = (start < end) ? (end - start) : (start - end);
     if (size <= 0) {

@@ -9,9 +9,9 @@ fi
 
 cleanup() {
   rm -f "$SCRIPT_DIR/out.c" "$SCRIPT_DIR/out.h" "$SCRIPT_DIR/out__runtime.c" \
-    "$SCRIPT_DIR/out.lowered.vx" "$SCRIPT_DIR/out.analysis.txt" \
+    "$SCRIPT_DIR/out.analysis.txt" \
     "$SCRIPT_DIR/pref.c" "$SCRIPT_DIR/pref.h" "$SCRIPT_DIR/pref__runtime.c" \
-    "$SCRIPT_DIR/pref.lowered.vx" "$SCRIPT_DIR/pref.analysis.txt"
+    "$SCRIPT_DIR/pref.analysis.txt"
   rm -rf "$SCRIPT_DIR/megalinker"
 }
 trap cleanup EXIT
