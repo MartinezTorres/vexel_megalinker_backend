@@ -411,6 +411,7 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
     bool is_external = false;
     std::string base_name;
     std::string func_key;
+    char call_reentrancy_key = current_reentrancy_key;
 
     // Get function name (already qualified by type checker for methods)
     if (expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
@@ -424,6 +425,24 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
         }
 
         if (callee_decl) {
+            if (!is_external) {
+                auto reent_it = facts.reentrancy_variants.find(sym);
+                if (reent_it == facts.reentrancy_variants.end() || reent_it->second.empty()) {
+                    throw CompileError("Internal error: missing reentrancy variants for callee '" +
+                                           base_name + "'",
+                                       expr->location);
+                }
+                if (!reent_it->second.count(call_reentrancy_key)) {
+                    if (reent_it->second.size() == 1) {
+                        call_reentrancy_key = *reent_it->second.begin();
+                    } else {
+                        throw CompileError("Internal error: caller/callee reentrancy mismatch for '" +
+                                               base_name + "'",
+                                           expr->location);
+                    }
+                }
+            }
+
             if (!callee_decl->ref_params.empty()) {
                 if (is_external) {
                     ref_key = std::string(callee_decl->ref_params.size(), 'M');
@@ -433,7 +452,7 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
             }
             if (!is_external) {
                 func_key = func_key_for(sym);
-                std::string variant = variant_name(base_name, sym, current_reentrancy_key, ref_key);
+                std::string variant = variant_name(base_name, sym, call_reentrancy_key, ref_key);
                 func_name = mangle_name(variant) + instance_suffix(sym);
             } else if (!ref_key.empty()) {
                 std::string variant = ref_variant_name(base_name, ref_key);
@@ -506,7 +525,7 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
     }
 
     bool call_nonreentrant_frame =
-        (!is_external && callee_decl && !callee_decl->is_exported && current_reentrancy_key == 'N');
+        (!is_external && callee_decl && !callee_decl->is_exported && call_reentrancy_key == 'N');
 
     std::vector<bool> param_is_aggregate;
     if (abi.lower_aggregates && callee_decl) {
