@@ -41,8 +41,16 @@ if [[ ! -f megalinker/rom_vx_G1.c || ! -f megalinker/rom_vx_G2.c ]]; then
   echo "missing rom globals"
   exit 1
 fi
+if [[ -f megalinker/rom_vx_G_UNUSED.c ]]; then
+  echo "unused rom global should be elided"
+  exit 1
+fi
 if [[ ! -f megalinker/ram_globals.c ]]; then
   echo "missing ram globals"
+  exit 1
+fi
+if rg -q "\\bvx_G_UNUSED\\b" out.h megalinker/*.c out__runtime.c; then
+  echo "unused global symbol leaked into output"
   exit 1
 fi
 

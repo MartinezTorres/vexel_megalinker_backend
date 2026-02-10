@@ -642,21 +642,9 @@ static std::string trampoline_name(const StmtPtr& decl,
     return name;
 }
 
-static size_t caller_limit_from_env() {
-    const char* env = std::getenv("VEXEL_MEGALINKER_CALLER_LIMIT");
-    if (!env || !*env) return 10;
-    char* end = nullptr;
-    long value = std::strtol(env, &end, 10);
-    if (!end || *end != '\0' || value <= 0) return 10;
-    return static_cast<size_t>(value);
-}
-
 static bool parse_caller_limit_option(const std::unordered_map<std::string, std::string>& opts,
                                       size_t& out) {
     auto it = opts.find("caller_limit");
-    if (it == opts.end()) {
-        it = opts.find("megalinker.caller_limit");
-    }
     if (it == opts.end()) return false;
     char* end = nullptr;
     long value = std::strtol(it->second.c_str(), &end, 10);
@@ -683,9 +671,6 @@ static bool is_valid_symbol_prefix(const std::string& value) {
 static bool parse_internal_prefix_option(const std::unordered_map<std::string, std::string>& opts,
                                          std::string& out) {
     auto it = opts.find("internal_prefix");
-    if (it == opts.end()) {
-        it = opts.find("megalinker.internal_prefix");
-    }
     if (it == opts.end()) return false;
     if (!is_valid_symbol_prefix(it->second)) {
         throw CompileError("Megalinker backend: internal_prefix must be a valid C identifier prefix",
@@ -805,11 +790,6 @@ static void emit_megalinker_backend(const BackendInput& input) {
     header_codegen.set_internal_symbol_prefix(internal_prefix);
     CCodegenResult header_result = header_codegen.generate(module, header_input);
 
-    std::filesystem::path legacy_path = input.outputs.dir / (input.outputs.stem + ".c");
-    if (std::filesystem::exists(legacy_path)) {
-        std::filesystem::remove(legacy_path);
-    }
-
     std::filesystem::path header_path = input.outputs.dir / (input.outputs.stem + ".h");
     std::filesystem::path runtime_path = input.outputs.dir / (input.outputs.stem + "__runtime.c");
     std::filesystem::path out_dir = input.outputs.dir / "megalinker";
@@ -820,62 +800,40 @@ static void emit_megalinker_backend(const BackendInput& input) {
         std::cout << "Writing runtime: " << runtime_path << std::endl;
     }
 
-    const Program* program = analyzed.program;
     int entry_instance_id = analyzed.entry_instance_id;
     auto bind_symbol = [&](int instance_id, const void* node) -> Symbol* {
         if (!analyzed.binding_for || !node) return nullptr;
         return analyzed.binding_for(instance_id, node);
     };
 
-    // Collect globals
+    // Collect globals from the frontend's live symbol set.
     std::unordered_map<std::string, GlobalInfo> globals;
-    if (program) {
-        for (const auto& instance : program->instances) {
-            const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
-            for (const auto& stmt : module.top_level) {
-                if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
-                Symbol* sym = bind_symbol(instance.id, stmt.get());
-                if (!sym) continue;
-                int scope_id = scope_id_for_symbol(sym, entry_instance_id);
-                std::string key = symbol_key(stmt->var_name, scope_id);
-                GlobalInfo info;
-                info.decl = stmt;
-                info.sym = sym;
-                info.scope_id = scope_id;
-                info.is_pointer_like = is_pointer_like(stmt->var_type);
-                info.c_name = header_codegen.mangle(stmt->var_name);
-                if (scope_id >= 0) {
-                    info.c_name += "_s" + std::to_string(scope_id);
-                }
-                bool force_ram = has_annotation(stmt->annotations, "nonbanked");
-                VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-                auto mit = analysis.var_mutability.find(sym);
-                if (mit != analysis.var_mutability.end()) mut = mit->second;
-                info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
-                if (!analysis.used_global_vars.count(sym) && !info.is_rom) {
-                    continue;
-                }
-                if (info.is_rom) {
-                    info.module_name = "rom_" + info.c_name;
-                }
-                globals[key] = info;
-            }
+    for (const Symbol* sym : analysis.used_global_vars) {
+        if (!sym || sym->is_local) continue;
+        if (sym->kind != Symbol::Kind::Variable && sym->kind != Symbol::Kind::Constant) continue;
+        StmtPtr stmt = sym->declaration;
+        if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
+
+        int scope_id = scope_id_for_symbol(sym, entry_instance_id);
+        std::string key = symbol_key(stmt->var_name, scope_id);
+        GlobalInfo info;
+        info.decl = stmt;
+        info.sym = sym;
+        info.scope_id = scope_id;
+        info.is_pointer_like = is_pointer_like(stmt->var_type);
+        info.c_name = header_codegen.mangle(stmt->var_name);
+        if (scope_id >= 0) {
+            info.c_name += "_s" + std::to_string(scope_id);
         }
-    } else {
-        for (const auto& stmt : module.top_level) {
-            if (!stmt || stmt->kind != Stmt::Kind::VarDecl) continue;
-            GlobalInfo info;
-            info.decl = stmt;
-            info.is_pointer_like = is_pointer_like(stmt->var_type);
-            info.c_name = header_codegen.mangle(stmt->var_name);
-            bool force_ram = has_annotation(stmt->annotations, "nonbanked");
-            VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-            info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
-            if (info.is_rom) {
-                info.module_name = "rom_" + info.c_name;
-            }
-            globals[stmt->var_name] = info;
+        bool force_ram = has_annotation(stmt->annotations, "nonbanked");
+        VarMutability mut = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
+        auto mit = analysis.var_mutability.find(sym);
+        if (mit != analysis.var_mutability.end()) mut = mit->second;
+        info.is_rom = !force_ram && (mut == VarMutability::Constexpr);
+        if (info.is_rom) {
+            info.module_name = "rom_" + info.c_name;
         }
+        globals[key] = info;
     }
 
     struct FunctionInfo {
@@ -885,54 +843,30 @@ static void emit_megalinker_backend(const BackendInput& input) {
         int scope_id = -1;
     };
 
-    // Collect functions
+    // Collect functions from the frontend's reachable set.
     std::unordered_map<std::string, FunctionInfo> function_map;
-    if (program) {
-        for (const auto& instance : program->instances) {
-            const Module& module = program->modules[static_cast<size_t>(instance.module_id)].module;
-            for (const auto& stmt : module.top_level) {
-                if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
-                if (stmt->is_external) continue;
-                Symbol* sym = bind_symbol(instance.id, stmt.get());
-                if (!sym || sym->kind != Symbol::Kind::Function) continue;
-                if (!analysis.reachable_functions.count(sym)) {
-                    continue;
-                }
-                bool has_expr_params = false;
-                for (const auto& p : stmt->params) {
-                    if (p.is_expression_param) {
-                        has_expr_params = true;
-                        break;
-                    }
-                }
-                if (has_expr_params) continue;
-                int scope_id = scope_id_for_symbol(sym, entry_instance_id);
-                std::string key = func_key_for(sym, entry_instance_id);
-                FunctionInfo info;
-                info.sym = sym;
-                info.decl = stmt;
-                info.instance_id = instance.id;
-                info.scope_id = scope_id;
-                function_map[key] = info;
+    for (const Symbol* sym : analysis.reachable_functions) {
+        if (!sym || sym->kind != Symbol::Kind::Function || sym->is_external) continue;
+        StmtPtr stmt = sym->declaration;
+        if (!stmt || stmt->kind != Stmt::Kind::FuncDecl || stmt->is_external) continue;
+
+        bool has_expr_params = false;
+        for (const auto& p : stmt->params) {
+            if (p.is_expression_param) {
+                has_expr_params = true;
+                break;
             }
         }
-    } else {
-        for (const auto& stmt : module.top_level) {
-            if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
-            if (stmt->is_external) continue;
-            bool has_expr_params = false;
-            for (const auto& p : stmt->params) {
-                if (p.is_expression_param) {
-                    has_expr_params = true;
-                    break;
-                }
-            }
-            if (has_expr_params) continue;
-            std::string key = reachability_key(qualified_name(stmt), -1);
-            FunctionInfo info;
-            info.decl = stmt;
-            function_map[key] = info;
-        }
+        if (has_expr_params) continue;
+
+        int scope_id = scope_id_for_symbol(sym, entry_instance_id);
+        std::string key = func_key_for(sym, entry_instance_id);
+        FunctionInfo info;
+        info.sym = sym;
+        info.decl = stmt;
+        info.instance_id = sym->instance_id;
+        info.scope_id = scope_id;
+        function_map[key] = info;
     }
 
     struct VariantBuildInfo {
@@ -947,7 +881,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         std::vector<std::string> order;
     } build;
 
-    size_t caller_limit = caller_limit_from_env();
+    size_t caller_limit = 10;
     (void)parse_caller_limit_option(input.options.backend_options, caller_limit);
 
     std::queue<std::string> pending;
@@ -1396,7 +1330,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     AnalysisFacts var_facts = analysis;
     for (const auto& kv : globals) {
         const GlobalInfo& info = kv.second;
-        if (info.is_rom && info.sym) {
+        if (info.sym) {
             var_facts.used_global_vars.insert(info.sym);
         }
     }
