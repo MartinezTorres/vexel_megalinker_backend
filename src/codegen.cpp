@@ -461,9 +461,20 @@ void CodeGenerator::validate_codegen_invariants_impl(const std::vector<StmtPtr>&
 
 void CodeGenerator::gen_module(const Module& mod) {
     const Program* program = analyzed_program ? analyzed_program->program : nullptr;
+    std::unordered_set<const Stmt*> live_top_level;
+    for (const auto& stmt : mod.top_level) {
+        if (stmt) {
+            live_top_level.insert(stmt.get());
+        }
+    }
 
     auto set_instance = [&](int instance_id) {
         current_instance_id = instance_id;
+    };
+
+    auto is_live_top_level = [&](const StmtPtr& stmt) -> bool {
+        if (!stmt) return false;
+        return live_top_level.count(stmt.get()) > 0;
     };
 
     auto for_instances = [&](auto&& fn) {
@@ -482,6 +493,9 @@ void CodeGenerator::gen_module(const Module& mod) {
     // External function forward declarations
     for_instances([&](const Module& module) {
         for (const auto& stmt : module.top_level) {
+            if (!is_live_top_level(stmt)) {
+                continue;
+            }
             if (stmt->kind == Stmt::Kind::FuncDecl && stmt->is_external) {
                 std::string func_name = stmt->func_name;
                 if (!stmt->type_namespace.empty()) {
@@ -521,6 +535,7 @@ void CodeGenerator::gen_module(const Module& mod) {
     if (program) {
         for (const auto& mod_info : program->modules) {
             for (const auto& stmt : mod_info.module.top_level) {
+                if (!is_live_top_level(stmt)) continue;
                 if (stmt->kind != Stmt::Kind::TypeDecl) continue;
                 if (!facts.used_type_names.empty() && !facts.used_type_names.count(stmt->type_decl_name)) {
                     continue;
@@ -533,6 +548,7 @@ void CodeGenerator::gen_module(const Module& mod) {
         }
     } else {
         for (const auto& stmt : mod.top_level) {
+            if (!is_live_top_level(stmt)) continue;
             if (stmt->kind != Stmt::Kind::TypeDecl) continue;
             if (!facts.used_type_names.empty() && !facts.used_type_names.count(stmt->type_decl_name)) {
                 continue;
@@ -549,6 +565,9 @@ void CodeGenerator::gen_module(const Module& mod) {
     // Forward declarations (only for reachable functions)
     for_instances([&](const Module& module) {
         for (const auto& stmt : module.top_level) {
+            if (!is_live_top_level(stmt)) {
+                continue;
+            }
             if (stmt->kind != Stmt::Kind::FuncDecl || stmt->is_external) {
                 continue;
             }
@@ -727,6 +746,9 @@ void CodeGenerator::gen_module(const Module& mod) {
     // Global variables and functions
     for_instances([&](const Module& module) {
         for (const auto& stmt : module.top_level) {
+            if (!is_live_top_level(stmt)) {
+                continue;
+            }
             gen_stmt(stmt);
         }
     });
