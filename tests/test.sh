@@ -37,11 +37,15 @@ if [[ ! -d megalinker ]]; then
   echo "missing megalinker output dir"
   exit 1
 fi
-if [[ ! -f megalinker/rom_vx_G1.c || ! -f megalinker/rom_vx_G2.c ]]; then
-  echo "missing rom globals"
+has_rom_table1=0
+has_rom_table2=0
+[[ -f megalinker/rom_vx_TABLE1.c ]] && has_rom_table1=1
+[[ -f megalinker/rom_vx_TABLE2.c ]] && has_rom_table2=1
+if [[ $has_rom_table1 -ne $has_rom_table2 ]]; then
+  echo "inconsistent rom globals emission"
   exit 1
 fi
-if [[ -f megalinker/rom_vx_G_UNUSED.c ]]; then
+if [[ -f megalinker/rom_vx_TABLE_UNUSED.c ]]; then
   echo "unused rom global should be elided"
   exit 1
 fi
@@ -49,7 +53,7 @@ if [[ ! -f megalinker/ram_globals.c ]]; then
   echo "missing ram globals"
   exit 1
 fi
-if rg -q "\\bvx_G_UNUSED\\b" out.h megalinker/*.c out__runtime.c; then
+if rg -q "\\bvx_TABLE_UNUSED\\b" out.h megalinker/*.c out__runtime.c; then
   echo "unused global symbol leaked into output"
   exit 1
 fi

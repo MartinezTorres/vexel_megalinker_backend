@@ -1,16 +1,18 @@
-G1:#i32 = 5;
-G2:#i32 = 7;
-G_UNUSED:#i32 = 99;
+TABLE1:#i32[3] = [5, 6, 7];
+TABLE2:#i32[2] = [10, 11];
+TABLE_UNUSED:#i32[1] = [99];
 GM:#i32;
 
 &reader() -> #i32 {
   GM = GM + 1;
-  x:#i32 = G1;
+  idx:#i32 = GM < 3 ? GM : 0;
+  x:#i32 = TABLE1[idx];
   x + GM
 }
 
 &callee(n:#i32) -> #i32 {
-  n + GM + G2
+  idx:#i32 = n < 2 ? n : 0;
+  n + GM + TABLE2[idx]
 }
 
 &caller1() -> #i32 {
