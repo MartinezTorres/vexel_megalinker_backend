@@ -358,7 +358,8 @@ void CodeGenerator::validate_codegen_invariants_impl(const std::vector<StmtPtr>&
                 break;
             case Expr::Kind::Conditional:
                 if (analyzed_program && analyzed_program->constexpr_condition) {
-                    auto cond = analyzed_program->constexpr_condition(expr->condition);
+                    int cond_instance_id = fact_instance_id_for_expr(expr->condition);
+                    auto cond = analyzed_program->constexpr_condition(cond_instance_id, expr->condition);
                     if (cond.has_value()) {
                         validate_expr(cond.value() ? expr->true_expr : expr->false_expr, value_required);
                         break;
@@ -1523,7 +1524,10 @@ void CodeGenerator::gen_var_decl(StmtPtr stmt) {
 
 bool CodeGenerator::is_compile_time_init(StmtPtr stmt) const {
     if (!stmt || !stmt->var_init) return false;
-    if (optimization && optimization->constexpr_inits.count(stmt.get())) return true;
+    if (optimization &&
+        optimization->constexpr_inits.count(stmt_fact_key(fact_instance_id_for_stmt(stmt), stmt.get()))) {
+        return true;
+    }
     if (stmt->var_type && stmt->var_type->kind == Type::Kind::Array &&
         (stmt->var_init->kind == Expr::Kind::ArrayLiteral || stmt->var_init->kind == Expr::Kind::Range)) {
         return true;
@@ -1689,7 +1693,8 @@ bool CodeGenerator::try_evaluate(ExprPtr expr, CTValue& out) const {
     };
 
     if (optimization && !contains_mutable_identifier(expr)) {
-        auto it = optimization->constexpr_values.find(expr.get());
+        auto it = optimization->constexpr_values.find(
+            expr_fact_key(fact_instance_id_for_expr(expr), expr.get()));
         if (it != optimization->constexpr_values.end()) {
             out = it->second;
             return true;
@@ -1709,6 +1714,34 @@ bool CodeGenerator::try_evaluate(ExprPtr expr, CTValue& out) const {
     }
 
     return analyzed_program->try_evaluate(eval_instance_id, expr, out);
+}
+
+int CodeGenerator::fact_instance_id_for_expr(ExprPtr expr) const {
+    if (expr) {
+        if (Symbol* sym = binding_for(expr.get())) {
+            if (sym->instance_id >= 0) {
+                return sym->instance_id;
+            }
+        }
+    }
+    if (current_instance_id >= 0) {
+        return current_instance_id;
+    }
+    return analyzed_program ? analyzed_program->entry_instance_id : -1;
+}
+
+int CodeGenerator::fact_instance_id_for_stmt(StmtPtr stmt) const {
+    if (stmt) {
+        if (Symbol* sym = binding_for(stmt.get())) {
+            if (sym->instance_id >= 0) {
+                return sym->instance_id;
+            }
+        }
+    }
+    if (current_instance_id >= 0) {
+        return current_instance_id;
+    }
+    return analyzed_program ? analyzed_program->entry_instance_id : -1;
 }
 
 bool CodeGenerator::is_addressable_lvalue(ExprPtr expr) const {

@@ -362,6 +362,7 @@ static std::string mutability_prefix(const AnalysisFacts& facts, const Symbol* s
 }
 
 static std::string array_size_str(const AnalyzedProgram& analyzed, TypePtr type,
+                                  int instance_id,
                                   const SourceLocation& loc) {
     if (!type || type->kind != Type::Kind::Array || !type->array_size) {
         throw CompileError("Array size must be compile-time constant", loc);
@@ -369,7 +370,8 @@ static std::string array_size_str(const AnalyzedProgram& analyzed, TypePtr type,
     if (!analyzed.optimization) {
         throw CompileError("Array size must be compile-time constant", loc);
     }
-    auto it = analyzed.optimization->constexpr_values.find(type->array_size.get());
+    auto it = analyzed.optimization->constexpr_values.find(
+        expr_fact_key(instance_id, type->array_size.get()));
     if (it == analyzed.optimization->constexpr_values.end()) {
         throw CompileError("Array size must be compile-time constant", loc);
     }
@@ -1142,7 +1144,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
         std::string mut = mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
             std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
-            std::string size = array_size_str(analyzed, decl->var_type, decl->location);
+            int size_instance_id = info.sym ? info.sym->instance_id : entry_instance_id;
+            std::string size = array_size_str(analyzed, decl->var_type, size_instance_id, decl->location);
             header_builder << "extern " << mut << elem_type << " " << name << "[" << size << "];\n";
         } else {
             if (!decl->var_type) {

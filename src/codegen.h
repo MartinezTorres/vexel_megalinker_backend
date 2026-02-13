@@ -174,6 +174,8 @@ private:
     std::string variant_name(const std::string& func_name, const Symbol* func_sym, char reent_key, const std::string& ref_key) const;
     bool receiver_is_mutable_arg(ExprPtr expr) const;
     bool try_evaluate(ExprPtr expr, CTValue& out) const;
+    int fact_instance_id_for_expr(ExprPtr expr) const;
+    int fact_instance_id_for_stmt(StmtPtr stmt) const;
     bool is_addressable_lvalue(ExprPtr expr) const;
     bool is_mutable_lvalue(ExprPtr expr) const;
     bool is_void_call(ExprPtr expr, std::string* name_out = nullptr) const;
