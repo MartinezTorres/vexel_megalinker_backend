@@ -1,6 +1,5 @@
 #include "codegen.h"
 #include "analysis.h"
-#include "evaluator.h"
 #include "expr_access.h"
 #include "function_key.h"
 #include "optimizer.h"
@@ -70,7 +69,7 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
         expr->kind != Expr::Kind::Block;
     if (allow_constexpr_fold && fold_side_effect_free) {
         CTValue folded;
-        if (try_evaluate(expr, folded)) {
+        if (lookup_constexpr_value(expr, folded)) {
             auto scalar_literal = [&](const CTValue& value) -> std::optional<std::string> {
                 if (std::holds_alternative<int64_t>(value)) {
                     return std::to_string(std::get<int64_t>(value));
@@ -897,60 +896,11 @@ std::string CodeGenerator::gen_block_optimized(ExprPtr expr) {
     return "";
 }
 
-std::string CodeGenerator::gen_call_optimized_with_evaluator(ExprPtr expr, CompileTimeEvaluator& evaluator) {
-    if (!expr || expr->kind != Expr::Kind::Call) return "";
-    if (!expr->operand || expr->operand->kind != Expr::Kind::Identifier) return "";
-
-    std::string func_name = expr->operand->name;
-
-    // Check if it's an external function
-    Symbol* sym = binding_for(expr->operand);
-    if (!sym || sym->kind != Symbol::Kind::Function || !sym->declaration) return "";
-    if (!sym->declaration->is_external) return "";
-
-    // Try to evaluate all arguments at compile-time
-    std::vector<std::string> arg_strs;
-
-    for (const auto& arg : expr->args) {
-        CTValue arg_val;
-        if (evaluator.try_evaluate(arg, arg_val)) {
-            if (std::holds_alternative<int64_t>(arg_val)) {
-                arg_strs.push_back(std::to_string(std::get<int64_t>(arg_val)));
-            } else if (std::holds_alternative<uint64_t>(arg_val)) {
-                arg_strs.push_back(std::to_string(std::get<uint64_t>(arg_val)));
-            } else {
-                return "";
-            }
-        } else {
-            return "";
-        }
-    }
-
-    // Generate optimized call
-    std::string result = mangle_name(func_name) + "(";
-    for (size_t i = 0; i < arg_strs.size(); i++) {
-        if (i > 0) result += ", ";
-        result += arg_strs[i];
-    }
-    result += ")";
-    return result;
-}
-
 std::string CodeGenerator::gen_conditional(ExprPtr expr) {
     // Try to evaluate condition at compile time for dead branch elimination
     {
-        CTValue cond_val;
-        if (try_evaluate(expr->condition, cond_val)) {
-            // Condition is compile-time constant - eliminate dead branch
-            bool is_true = false;
-            if (std::holds_alternative<int64_t>(cond_val)) {
-                is_true = std::get<int64_t>(cond_val) != 0;
-            } else if (std::holds_alternative<bool>(cond_val)) {
-                is_true = std::get<bool>(cond_val);
-            } else if (std::holds_alternative<uint64_t>(cond_val)) {
-                is_true = std::get<uint64_t>(cond_val) != 0;
-            }
-
+        bool is_true = false;
+        if (constexpr_condition(expr->condition, is_true)) {
             if (is_true) {
                 if (allow_void_call) {
                     return gen_expr(expr->true_expr);
@@ -1227,9 +1177,25 @@ std::optional<std::pair<int64_t, int64_t>> CodeGenerator::evaluate_range(ExprPtr
     }
 
     CTValue start_val, end_val;
-    if (try_evaluate(range_expr->left, start_val) &&
-        try_evaluate(range_expr->right, end_val)) {
-        return std::make_pair(std::get<int64_t>(start_val), std::get<int64_t>(end_val));
+    if (lookup_constexpr_value(range_expr->left, start_val) &&
+        lookup_constexpr_value(range_expr->right, end_val)) {
+        auto to_i64 = [](const CTValue& v, int64_t& out) -> bool {
+            if (std::holds_alternative<int64_t>(v)) {
+                out = std::get<int64_t>(v);
+                return true;
+            }
+            if (std::holds_alternative<uint64_t>(v)) {
+                out = static_cast<int64_t>(std::get<uint64_t>(v));
+                return true;
+            }
+            return false;
+        };
+        int64_t start = 0;
+        int64_t end = 0;
+        if (!to_i64(start_val, start) || !to_i64(end_val, end)) {
+            return std::nullopt;
+        }
+        return std::make_pair(start, end);
     }
     return std::nullopt;
 }
@@ -1350,8 +1316,8 @@ std::string CodeGenerator::gen_iteration(ExprPtr expr) {
 
     if (expr->operand->kind == Expr::Kind::Range) {
         CTValue start_val, end_val;
-        if (!try_evaluate(expr->operand->left, start_val) ||
-            !try_evaluate(expr->operand->right, end_val)) {
+        if (!lookup_constexpr_value(expr->operand->left, start_val) ||
+            !lookup_constexpr_value(expr->operand->right, end_val)) {
             throw CompileError("Range iteration requires compile-time constant bounds", expr->location);
         }
         int64_t start = value_to_int64(start_val, expr->operand->left->location);

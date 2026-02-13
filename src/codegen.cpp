@@ -1,6 +1,5 @@
 #include "codegen.h"
 #include "analysis.h"
-#include "evaluator.h"
 #include "expr_access.h"
 #include "function_key.h"
 #include "optimizer.h"
@@ -67,6 +66,26 @@ static std::string render_annotation_comment(const std::vector<Annotation>& anns
         os << "]]";
     }
     return os.str();
+}
+
+static bool ct_scalar_to_bool(const CTValue& value, bool& out) {
+    if (std::holds_alternative<int64_t>(value)) {
+        out = std::get<int64_t>(value) != 0;
+        return true;
+    }
+    if (std::holds_alternative<uint64_t>(value)) {
+        out = std::get<uint64_t>(value) != 0;
+        return true;
+    }
+    if (std::holds_alternative<bool>(value)) {
+        out = std::get<bool>(value);
+        return true;
+    }
+    if (std::holds_alternative<double>(value)) {
+        out = std::get<double>(value) != 0.0;
+        return true;
+    }
+    return false;
 }
 
 static std::string render_function_traits_comment(bool is_external,
@@ -357,11 +376,10 @@ void CodeGenerator::validate_codegen_invariants_impl(const std::vector<StmtPtr>&
                 validate_expr(expr->result_expr, value_required);
                 break;
             case Expr::Kind::Conditional:
-                if (analyzed_program && analyzed_program->constexpr_condition) {
-                    int cond_instance_id = fact_instance_id_for_expr(expr->condition);
-                    auto cond = analyzed_program->constexpr_condition(cond_instance_id, expr->condition);
-                    if (cond.has_value()) {
-                        validate_expr(cond.value() ? expr->true_expr : expr->false_expr, value_required);
+                {
+                    bool cond = false;
+                    if (constexpr_condition(expr->condition, cond)) {
+                        validate_expr(cond ? expr->true_expr : expr->false_expr, value_required);
                         break;
                     }
                 }
@@ -886,18 +904,8 @@ void CodeGenerator::gen_stmt(StmtPtr stmt) {
         case Stmt::Kind::ConditionalStmt:
             // Try compile-time evaluation for dead branch elimination
             {
-                CTValue cond_val;
-                if (try_evaluate(stmt->condition, cond_val)) {
-                    // Compile-time constant condition
-                    bool is_true = false;
-                    if (std::holds_alternative<int64_t>(cond_val)) {
-                        is_true = std::get<int64_t>(cond_val) != 0;
-                    } else if (std::holds_alternative<bool>(cond_val)) {
-                        is_true = std::get<bool>(cond_val);
-                    } else if (std::holds_alternative<uint64_t>(cond_val)) {
-                        is_true = std::get<uint64_t>(cond_val) != 0;
-                    }
-
+                bool is_true = false;
+                if (constexpr_condition(stmt->condition, is_true)) {
                     if (is_true) {
                         // Only generate true branch
                         gen_stmt(stmt->true_stmt);
@@ -1201,7 +1209,7 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
     if (stmt->body) {
         if (stmt->params.empty() && stmt->ref_params.empty()) {
             CTValue result;
-            if (try_evaluate(stmt->body, result)) {
+            if (lookup_constexpr_value(stmt->body, result)) {
                 if (std::holds_alternative<int64_t>(result)) {
                     emit_return_stmt(std::to_string(std::get<int64_t>(result)));
                     handled_body = true;
@@ -1434,7 +1442,7 @@ void CodeGenerator::gen_var_decl(StmtPtr stmt) {
             // Try compile-time evaluation for simple constants
             {
             CTValue result;
-            if (try_evaluate(stmt->var_init, result)) {
+            if (lookup_constexpr_value(stmt->var_init, result)) {
                 // Successfully evaluated at compile time
                 std::string init_val;
                 if (std::holds_alternative<int64_t>(result)) {
@@ -1532,8 +1540,7 @@ bool CodeGenerator::is_compile_time_init(StmtPtr stmt) const {
         (stmt->var_init->kind == Expr::Kind::ArrayLiteral || stmt->var_init->kind == Expr::Kind::Range)) {
         return true;
     }
-    CTValue result;
-    return try_evaluate(stmt->var_init, result);
+    return false;
 }
 
 std::string CodeGenerator::mutability_prefix(StmtPtr stmt) const {
@@ -1642,78 +1649,31 @@ bool CodeGenerator::is_void_call(ExprPtr expr, std::string* name_out) const {
     return true;
 }
 
-bool CodeGenerator::try_evaluate(ExprPtr expr, CTValue& out) const {
-    if (!expr) return false;
-
-    auto contains_mutable_identifier = [&](ExprPtr root) -> bool {
-        std::function<bool(ExprPtr)> visit = [&](ExprPtr node) -> bool {
-            if (!node) return false;
-            switch (node->kind) {
-                case Expr::Kind::Identifier: {
-                    Symbol* sym = binding_for(node);
-                    return sym && sym->is_mutable;
-                }
-                case Expr::Kind::Binary:
-                    return visit(node->left) || visit(node->right);
-                case Expr::Kind::Unary:
-                case Expr::Kind::Cast:
-                case Expr::Kind::Length:
-                case Expr::Kind::Member:
-                    return visit(node->operand);
-                case Expr::Kind::Call:
-                    if (visit(node->operand)) return true;
-                    for (const auto& rec : node->receivers) {
-                        if (visit(rec)) return true;
-                    }
-                    for (const auto& arg : node->args) {
-                        if (visit(arg)) return true;
-                    }
-                    return false;
-                case Expr::Kind::Index:
-                    if (visit(node->operand)) return true;
-                    for (const auto& arg : node->args) {
-                        if (visit(arg)) return true;
-                    }
-                    return false;
-                case Expr::Kind::ArrayLiteral:
-                case Expr::Kind::TupleLiteral:
-                    for (const auto& elem : node->elements) {
-                        if (visit(elem)) return true;
-                    }
-                    return false;
-                case Expr::Kind::Conditional:
-                    return visit(node->condition) || visit(node->true_expr) || visit(node->false_expr);
-                case Expr::Kind::Range:
-                    return visit(node->left) || visit(node->right);
-                default:
-                    return false;
-            }
-        };
-        return visit(root);
-    };
-
-    if (optimization && !contains_mutable_identifier(expr)) {
-        auto it = optimization->constexpr_values.find(
-            expr_fact_key(fact_instance_id_for_expr(expr), expr.get()));
-        if (it != optimization->constexpr_values.end()) {
-            out = it->second;
-            return true;
-        }
-    }
-
-    if (!analyzed_program || !analyzed_program->try_evaluate) {
+bool CodeGenerator::lookup_constexpr_value(ExprPtr expr, CTValue& out) const {
+    if (!expr || !optimization) return false;
+    auto it = optimization->constexpr_values.find(
+        expr_fact_key(fact_instance_id_for_expr(expr), expr.get()));
+    if (it == optimization->constexpr_values.end()) {
         return false;
     }
+    out = it->second;
+    return true;
+}
 
-    int eval_instance_id = current_instance_id;
-    if (eval_instance_id < 0 && analyzed_program->entry_instance_id >= 0) {
-        eval_instance_id = analyzed_program->entry_instance_id;
+bool CodeGenerator::constexpr_condition(ExprPtr expr, bool& out) const {
+    if (!expr || !optimization) return false;
+    auto cond_it = optimization->constexpr_conditions.find(
+        expr_fact_key(fact_instance_id_for_expr(expr), expr.get()));
+    if (cond_it != optimization->constexpr_conditions.end()) {
+        out = cond_it->second;
+        return true;
     }
-    if (eval_instance_id < 0) {
+
+    CTValue value;
+    if (!lookup_constexpr_value(expr, value)) {
         return false;
     }
-
-    return analyzed_program->try_evaluate(eval_instance_id, expr, out);
+    return ct_scalar_to_bool(value, out);
 }
 
 int CodeGenerator::fact_instance_id_for_expr(ExprPtr expr) const {

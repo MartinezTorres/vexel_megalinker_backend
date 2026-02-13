@@ -1,6 +1,5 @@
 #include "codegen.h"
 #include "analysis.h"
-#include "evaluator.h"
 #include "expr_access.h"
 #include "function_key.h"
 #include "optimizer.h"
@@ -237,35 +236,9 @@ int64_t CodeGenerator::resolve_array_length(TypePtr type, const SourceLocation& 
         throw CompileError("Cannot determine array length for comparator generation", loc);
     }
     CTValue size_val;
-    if (!try_evaluate(type->array_size, size_val)) {
-        if (type->array_size->kind == Expr::Kind::Identifier) {
-            if (Symbol* size_sym = binding_for(type->array_size)) {
-                if (!size_sym->is_mutable &&
-                    size_sym->declaration &&
-                    size_sym->declaration->var_init &&
-                    try_evaluate(size_sym->declaration->var_init, size_val)) {
-                    // resolved through immutable declaration initializer
-                } else {
-                    throw CompileError("Array length must be compile-time constant", loc);
-                }
-            } else {
-                throw CompileError("Array length must be compile-time constant", loc);
-            }
-        } else
-        if (type->array_size->kind == Expr::Kind::IntLiteral &&
-            !type->array_size->raw_literal.empty()) {
-            std::string raw = type->array_size->raw_literal;
-            raw.erase(std::remove(raw.begin(), raw.end(), '_'), raw.end());
-            char* end = nullptr;
-            unsigned long long parsed = std::strtoull(raw.c_str(), &end, 0);
-            if (end && *end == '\0') {
-                return static_cast<int64_t>(parsed);
-            }
-            throw CompileError("Array length must be compile-time constant", loc);
-        }
-        else {
-            throw CompileError("Array length must be compile-time constant", loc);
-        }
+    if (!lookup_constexpr_value(type->array_size, size_val)) {
+        throw CompileError("Array length must be compile-time constant (frontend CTE fact missing)",
+                           loc);
     }
 
     if (std::holds_alternative<int64_t>(size_val)) {

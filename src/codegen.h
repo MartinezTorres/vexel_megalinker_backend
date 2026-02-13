@@ -2,7 +2,6 @@
 #include "analyzed_program.h"
 #include "ast.h"
 #include "analysis.h"
-#include "evaluator.h"
 #include <sstream>
 #include <unordered_set>
 #include <unordered_map>
@@ -155,7 +154,6 @@ private:
     std::string gen_tuple_literal(ExprPtr expr);
     std::string gen_block(ExprPtr expr);
     std::string gen_block_optimized(ExprPtr expr);
-    std::string gen_call_optimized_with_evaluator(ExprPtr expr, CompileTimeEvaluator& evaluator);
     std::string gen_conditional(ExprPtr expr);
     std::string gen_cast(ExprPtr expr);
     std::string gen_assignment(ExprPtr expr);
@@ -173,7 +171,8 @@ private:
     std::string reentrancy_variant_name(const std::string& func_name, const Symbol* func_sym, char reent_key) const;
     std::string variant_name(const std::string& func_name, const Symbol* func_sym, char reent_key, const std::string& ref_key) const;
     bool receiver_is_mutable_arg(ExprPtr expr) const;
-    bool try_evaluate(ExprPtr expr, CTValue& out) const;
+    bool lookup_constexpr_value(ExprPtr expr, CTValue& out) const;
+    bool constexpr_condition(ExprPtr expr, bool& out) const;
     int fact_instance_id_for_expr(ExprPtr expr) const;
     int fact_instance_id_for_stmt(StmtPtr stmt) const;
     bool is_addressable_lvalue(ExprPtr expr) const;
