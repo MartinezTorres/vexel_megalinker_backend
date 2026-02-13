@@ -1122,8 +1122,11 @@ static void emit_megalinker_backend(const BackendInput& input) {
                                           variant.instance_id, entry_instance_id);
         }
         variant.alters_caller_page = alters;
-        if (!variant.caller_id.empty() && alters) {
+        if (!variant.caller_id.empty()) {
             if (build.variants.find(variant.caller_id) != build.variants.end()) {
+                // Conservative restore: each callee variant is already caller-specialized,
+                // so restoring the caller page is always correct and avoids under-modeling
+                // page changes from backend-specific lowering details.
                 variant.needs_restore = true;
             }
         }
