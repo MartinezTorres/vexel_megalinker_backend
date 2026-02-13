@@ -702,6 +702,29 @@ static bool parse_internal_prefix_arg(const std::string& value, std::string& err
     return true;
 }
 
+static void validate_megalinker_backend_options(const Compiler::Options& options, std::string& error) {
+    for (const auto& entry : options.backend_options) {
+        if (entry.first != "caller_limit" && entry.first != "internal_prefix") {
+            error = "Megalinker backend: unknown backend option key '" + entry.first + "'";
+            return;
+        }
+    }
+
+    auto caller_it = options.backend_options.find("caller_limit");
+    if (caller_it != options.backend_options.end()) {
+        if (!parse_positive_int_option(caller_it->second, error)) {
+            return;
+        }
+    }
+
+    auto prefix_it = options.backend_options.find("internal_prefix");
+    if (prefix_it != options.backend_options.end()) {
+        if (!parse_internal_prefix_arg(prefix_it->second, error)) {
+            return;
+        }
+    }
+}
+
 static bool parse_megalinker_option(int argc,
                                     char** argv,
                                     int& index,
@@ -1478,6 +1501,7 @@ void register_backend_megalinker() {
     backend.emit = emit_megalinker_backend;
     backend.analysis_requirements = megalinker_analysis_requirements;
     backend.boundary_reentrancy_mode = megalinker_boundary_reentrancy_mode;
+    backend.validate_options = validate_megalinker_backend_options;
     backend.parse_option = parse_megalinker_option;
     backend.print_usage = print_megalinker_usage;
     (void)register_backend(backend);
