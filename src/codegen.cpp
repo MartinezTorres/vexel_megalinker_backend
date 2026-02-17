@@ -1536,10 +1536,6 @@ bool CodeGenerator::is_compile_time_init(StmtPtr stmt) const {
         optimization->constexpr_inits.count(stmt_fact_key(fact_instance_id_for_stmt(stmt), stmt.get()))) {
         return true;
     }
-    if (stmt->var_type && stmt->var_type->kind == Type::Kind::Array &&
-        (stmt->var_init->kind == Expr::Kind::ArrayLiteral || stmt->var_init->kind == Expr::Kind::Range)) {
-        return true;
-    }
     return false;
 }
 
