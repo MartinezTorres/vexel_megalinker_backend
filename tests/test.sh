@@ -21,6 +21,28 @@ if ! VEXEL_ROOT_DIR="$ROOT" make -s -C "$ROOT" driver >/tmp/driver_build.out 2>/
   exit 1
 fi
 
+if rg -q "CompileTimeEvaluator" "$ROOT/backends/ext/megalinker/src"; then
+  echo "backend must not own compile-time evaluator semantics"
+  exit 1
+fi
+if ! rg -q "backend received module without analysis facts" "$ROOT/backends/ext/megalinker/src/codegen.cpp"; then
+  echo "missing analysis-facts contract guard"
+  exit 1
+fi
+if ! rg -q "backend single-function emit missing analysis facts" "$ROOT/backends/ext/megalinker/src/codegen.cpp"; then
+  echo "missing single-function analysis-facts contract guard"
+  exit 1
+fi
+if rg -q '^static bool is_pointer_like\(|^static bool is_addressable_lvalue\(|^static bool is_mutable_lvalue\(|^static std::string ref_variant_key\(|^static std::string mutability_prefix\(' \
+  "$ROOT/backends/ext/megalinker/src/megalinker_backend.cpp"; then
+  echo "duplicate semantics helpers must not live in megalinker_backend.cpp"
+  exit 1
+fi
+if ! rg -q 'megalinker_semantics::is_pointer_like_type\(' "$ROOT/backends/ext/megalinker/src/megalinker_backend.cpp"; then
+  echo "megalinker backend must use shared local semantics helper for pointer-like checks"
+  exit 1
+fi
+
 pushd "$SCRIPT_DIR" >/dev/null
 
 if ! "$ROOT/build/vexel" -b megalinker --backend-opt caller_limit=1 -o out input.vx \

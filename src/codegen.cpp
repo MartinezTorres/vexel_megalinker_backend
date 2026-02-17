@@ -4,6 +4,7 @@
 #include "expr_access.h"
 #include "function_key.h"
 #include "optimizer.h"
+#include "semantics.h"
 #include "constants.h"
 #include <algorithm>
 #include <functional>
@@ -1522,32 +1523,11 @@ bool CodeGenerator::is_compile_time_init(StmtPtr stmt) const {
 
 std::string CodeGenerator::mutability_prefix(StmtPtr stmt) const {
     Symbol* sym = binding_for(stmt);
-    auto it = sym ? facts.var_mutability.find(sym) : facts.var_mutability.end();
-    VarMutability kind = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-    if (it != facts.var_mutability.end()) {
-        kind = it->second;
-    }
-    switch (kind) {
-        case VarMutability::Mutable:
-            return "VX_MUTABLE ";
-        case VarMutability::Constexpr:
-            return "VX_CONSTEXPR ";
-        default:
-            return "";
-    }
+    return megalinker_semantics::mutability_prefix(facts, sym, stmt);
 }
 
 std::string CodeGenerator::ref_variant_key(const ExprPtr& call, size_t ref_count) const {
-    std::string key;
-    key.reserve(ref_count);
-    for (size_t i = 0; i < ref_count; i++) {
-        bool is_mut = false;
-        if (call && i < call->receivers.size()) {
-            is_mut = receiver_is_mutable_arg(call->receivers[i]);
-        }
-        key.push_back(is_mut ? 'M' : 'N');
-    }
-    return key;
+    return megalinker_semantics::ref_variant_key_for_call(call, ref_count);
 }
 
 std::vector<std::string> CodeGenerator::ref_variant_keys_for(StmtPtr stmt) const {
@@ -1610,7 +1590,8 @@ std::string CodeGenerator::variant_name(const std::string& func_name, const Symb
 }
 
 bool CodeGenerator::receiver_is_mutable_arg(ExprPtr expr) const {
-    return is_addressable_lvalue(expr) && is_mutable_lvalue(expr);
+    return megalinker_semantics::is_addressable_lvalue_expr(expr) &&
+           megalinker_semantics::is_mutable_lvalue_expr(expr);
 }
 
 bool CodeGenerator::is_void_call(ExprPtr expr, std::string* name_out) const {
@@ -1682,29 +1663,11 @@ int CodeGenerator::fact_instance_id_for_stmt(StmtPtr stmt) const {
 }
 
 bool CodeGenerator::is_addressable_lvalue(ExprPtr expr) const {
-    if (!expr) return false;
-    switch (expr->kind) {
-        case Expr::Kind::Identifier:
-            return true;
-        case Expr::Kind::Member:
-        case Expr::Kind::Index:
-            return is_addressable_lvalue(expr->operand);
-        default:
-            return false;
-    }
+    return megalinker_semantics::is_addressable_lvalue_expr(expr);
 }
 
 bool CodeGenerator::is_mutable_lvalue(ExprPtr expr) const {
-    if (!expr) return false;
-    switch (expr->kind) {
-        case Expr::Kind::Identifier:
-            return expr->is_mutable_binding;
-        case Expr::Kind::Member:
-        case Expr::Kind::Index:
-            return is_mutable_lvalue(expr->operand);
-        default:
-            return false;
-    }
+    return megalinker_semantics::is_mutable_lvalue_expr(expr);
 }
 
 bool CodeGenerator::is_aggregate_type(TypePtr type) const {
@@ -1715,10 +1678,7 @@ bool CodeGenerator::is_aggregate_type(TypePtr type) const {
 }
 
 bool CodeGenerator::is_pointer_like(TypePtr type) const {
-    if (!type) return false;
-    if (type->kind == Type::Kind::Array) return true;
-    if (type->kind == Type::Kind::Primitive && type->primitive == PrimitiveType::String) return true;
-    return false;
+    return megalinker_semantics::is_pointer_like_type(type);
 }
 
 TypePtr CodeGenerator::resolve_type(TypePtr type) const {

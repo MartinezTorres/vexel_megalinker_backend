@@ -3,6 +3,7 @@
 #include "codegen.h"
 #include "constants.h"
 #include "function_key.h"
+#include "semantics.h"
 #include "common.h"
 #include <algorithm>
 #include <cctype>
@@ -232,52 +233,6 @@ static std::string extract_return_type(const std::string& proto, const std::stri
     return trim_copy(proto.substr(0, start));
 }
 
-static bool is_pointer_like(TypePtr type) {
-    if (!type) return false;
-    if (type->kind == Type::Kind::Array) return true;
-    if (type->kind == Type::Kind::Primitive && type->primitive == PrimitiveType::String) return true;
-    return false;
-}
-
-static bool is_addressable_lvalue(ExprPtr expr) {
-    if (!expr) return false;
-    switch (expr->kind) {
-        case Expr::Kind::Identifier:
-            return true;
-        case Expr::Kind::Member:
-        case Expr::Kind::Index:
-            return is_addressable_lvalue(expr->operand);
-        default:
-            return false;
-    }
-}
-
-static bool is_mutable_lvalue(ExprPtr expr) {
-    if (!expr) return false;
-    switch (expr->kind) {
-        case Expr::Kind::Identifier:
-            return expr->is_mutable_binding;
-        case Expr::Kind::Member:
-        case Expr::Kind::Index:
-            return is_mutable_lvalue(expr->operand);
-        default:
-            return false;
-    }
-}
-
-static std::string ref_variant_key(ExprPtr call, size_t ref_count) {
-    std::string key;
-    key.reserve(ref_count);
-    for (size_t i = 0; i < ref_count; ++i) {
-        bool is_mut = false;
-        if (call && i < call->receivers.size()) {
-            is_mut = is_addressable_lvalue(call->receivers[i]) && is_mutable_lvalue(call->receivers[i]);
-        }
-        key.push_back(is_mut ? 'M' : 'N');
-    }
-    return key;
-}
-
 static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
     if (!expr) return;
     if (expr->kind == Expr::Kind::Call) {
@@ -342,22 +297,6 @@ static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
             break;
         default:
             break;
-    }
-}
-
-static std::string mutability_prefix(const AnalysisFacts& facts, const Symbol* sym, StmtPtr stmt) {
-    auto it = sym ? facts.var_mutability.find(sym) : facts.var_mutability.end();
-    VarMutability kind = stmt->is_mutable ? VarMutability::Mutable : VarMutability::Constexpr;
-    if (it != facts.var_mutability.end()) {
-        kind = it->second;
-    }
-    switch (kind) {
-        case VarMutability::Mutable:
-            return "VX_MUTABLE ";
-        case VarMutability::Constexpr:
-            return "VX_CONSTEXPR ";
-        default:
-            return "";
     }
 }
 
@@ -524,7 +463,7 @@ static PtrKind infer_ptr_kind(ExprPtr expr,
                               const AnalyzedProgram& analyzed,
                               int entry_instance_id) {
     if (!expr || !expr->type) return PtrKind::Ram;
-    if (!is_pointer_like(expr->type)) return PtrKind::Ram;
+    if (!megalinker_semantics::is_pointer_like_type(expr->type)) return PtrKind::Ram;
 
     switch (expr->kind) {
         case Expr::Kind::StringLiteral:
@@ -612,7 +551,7 @@ static std::string param_sig(const StmtPtr& decl, const std::vector<PtrKind>& ki
     size_t kidx = 0;
     for (const auto& param : decl->params) {
         if (param.is_expression_param) continue;
-        if (is_pointer_like(param.type)) {
+        if (megalinker_semantics::is_pointer_like_type(param.type)) {
             PtrKind k = (kidx < kinds.size()) ? kinds[kidx] : PtrKind::Ram;
             sig.push_back(k == PtrKind::Far ? 'F' : 'R');
         } else {
@@ -845,7 +784,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         info.decl = stmt;
         info.sym = sym;
         info.scope_id = scope_id;
-        info.is_pointer_like = is_pointer_like(stmt->var_type);
+        info.is_pointer_like = megalinker_semantics::is_pointer_like_type(stmt->var_type);
         info.c_name = header_codegen.mangle(stmt->var_name);
         if (scope_id >= 0) {
             info.c_name += "_s" + std::to_string(scope_id);
@@ -979,7 +918,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
         size_t param_idx = 0;
         for (const auto& param : decl->params) {
             if (param.is_expression_param) continue;
-            if (param_idx < param_kinds.size() && is_pointer_like(param.type)) {
+            if (param_idx < param_kinds.size() &&
+                megalinker_semantics::is_pointer_like_type(param.type)) {
                 v.param_kind_by_name[param.name] = param_kinds[param_idx];
             }
             param_idx++;
@@ -1007,7 +947,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
             std::vector<PtrKind> param_kinds;
             for (const auto& param : decl->params) {
                 if (param.is_expression_param) continue;
-                if (is_pointer_like(param.type)) {
+                if (megalinker_semantics::is_pointer_like_type(param.type)) {
                     param_kinds.push_back(PtrKind::Far);
                 } else {
                     param_kinds.push_back(PtrKind::Ram);
@@ -1042,7 +982,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
             if (f_it == function_map.end()) continue;
 
             char desired_reent = choose_reent_key(analysis, sym, variant.reent_key);
-            std::string desired_ref = ref_variant_key(call, sym->declaration->ref_params.size());
+            std::string desired_ref = megalinker_semantics::ref_variant_key_for_call(
+                call, sym->declaration->ref_params.size());
             desired_ref = choose_ref_key(analysis, sym, sym->declaration, desired_ref);
 
             std::vector<PtrKind> param_kinds;
@@ -1054,7 +995,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
                     continue;
                 }
                 ExprPtr arg_expr = (arg_idx < call->args.size()) ? call->args[arg_idx] : nullptr;
-                if (is_pointer_like(param.type)) {
+                if (megalinker_semantics::is_pointer_like_type(param.type)) {
                     param_kinds.push_back(infer_ptr_kind(arg_expr, variant, globals, analyzed, entry_instance_id));
                 } else {
                     param_kinds.push_back(PtrKind::Ram);
@@ -1144,7 +1085,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (!decl) continue;
         std::string name = header_codegen.mangle(decl->var_name);
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
-        std::string mut = mutability_prefix(analysis, info.sym, decl);
+        std::string mut = megalinker_semantics::mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
             std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
             int size_instance_id = info.sym ? info.sym->instance_id : entry_instance_id;
