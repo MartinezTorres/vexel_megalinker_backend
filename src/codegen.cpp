@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "analysis.h"
+#include "cte_value_utils.h"
 #include "expr_access.h"
 #include "function_key.h"
 #include "optimizer.h"
@@ -66,26 +67,6 @@ static std::string render_annotation_comment(const std::vector<Annotation>& anns
         os << "]]";
     }
     return os.str();
-}
-
-static bool ct_scalar_to_bool(const CTValue& value, bool& out) {
-    if (std::holds_alternative<int64_t>(value)) {
-        out = std::get<int64_t>(value) != 0;
-        return true;
-    }
-    if (std::holds_alternative<uint64_t>(value)) {
-        out = std::get<uint64_t>(value) != 0;
-        return true;
-    }
-    if (std::holds_alternative<bool>(value)) {
-        out = std::get<bool>(value);
-        return true;
-    }
-    if (std::holds_alternative<double>(value)) {
-        out = std::get<double>(value) != 0.0;
-        return true;
-    }
-    return false;
 }
 
 static std::string render_function_traits_comment(bool is_external,
@@ -1669,7 +1650,7 @@ bool CodeGenerator::constexpr_condition(ExprPtr expr, bool& out) const {
     if (!lookup_constexpr_value(expr, value)) {
         return false;
     }
-    return ct_scalar_to_bool(value, out);
+    return cte_scalar_to_bool(value, out);
 }
 
 int CodeGenerator::fact_instance_id_for_expr(ExprPtr expr) const {
