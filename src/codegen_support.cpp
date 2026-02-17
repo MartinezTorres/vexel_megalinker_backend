@@ -85,6 +85,40 @@ std::string CodeGenerator::gen_type(TypePtr type) {
     return "void";
 }
 
+std::string CodeGenerator::gen_object_decl(TypePtr type,
+                                           const std::string& name,
+                                           const SourceLocation& loc,
+                                           const std::string& context) {
+    if (!type) {
+        throw CompileError("Missing type during code generation: " + context, loc);
+    }
+    TypePtr base = type;
+    while (base && base->kind == Type::Kind::Array) {
+        base = base->element_type;
+    }
+    std::string decl = require_type(base, loc, context + " base type");
+    if (!name.empty()) {
+        decl += " " + name;
+    }
+    append_array_suffix(type, loc, context, decl);
+    return decl;
+}
+
+void CodeGenerator::append_array_suffix(TypePtr type,
+                                        const SourceLocation& loc,
+                                        const std::string& context,
+                                        std::string& out) {
+    if (!type) {
+        throw CompileError("Missing type during code generation: " + context, loc);
+    }
+    TypePtr dim = type;
+    while (dim && dim->kind == Type::Kind::Array) {
+        int64_t len = resolve_array_length(dim, loc);
+        out += "[" + std::to_string(len) + "]";
+        dim = dim->element_type;
+    }
+}
+
 std::string CodeGenerator::mangle_name(const std::string& name) {
     return mangle_name_with_prefix(name, internal_symbol_prefix);
 }
@@ -239,6 +273,10 @@ int64_t CodeGenerator::resolve_array_length(TypePtr type, const SourceLocation& 
     }
     CTValue size_val;
     if (!lookup_constexpr_value(type->array_size, size_val)) {
+        ExprPtr size_expr = type->array_size;
+        if (size_expr && size_expr->kind == Expr::Kind::IntLiteral) {
+            return static_cast<int64_t>(size_expr->uint_val);
+        }
         throw CompileError("Array length must be compile-time constant (frontend CTE fact missing)",
                            loc);
     }

@@ -760,6 +760,25 @@ std::string CodeGenerator::gen_member(ExprPtr expr) {
     return obj + accessor + member_name;
 }
 
+std::string CodeGenerator::gen_array_initializer(ExprPtr expr) {
+    if (!expr || expr->kind != Expr::Kind::ArrayLiteral) {
+        throw CompileError("Expected array literal for initializer", expr ? expr->location : SourceLocation());
+    }
+    std::string init = "{";
+    for (size_t i = 0; i < expr->elements.size(); i++) {
+        if (i > 0) init += ", ";
+        ExprPtr elem = expr->elements[i];
+        if (elem && elem->kind == Expr::Kind::ArrayLiteral) {
+            init += gen_array_initializer(elem);
+            continue;
+        }
+        VoidCallGuard guard(*this, false);
+        init += gen_expr(elem);
+    }
+    init += "}";
+    return init;
+}
+
 std::string CodeGenerator::gen_array_literal(ExprPtr expr) {
     std::string temp = fresh_temp();
 
@@ -767,21 +786,13 @@ std::string CodeGenerator::gen_array_literal(ExprPtr expr) {
     if (!expr->type || expr->type->kind != Type::Kind::Array || !expr->type->element_type) {
         throw CompileError("Missing array element type for array literal", expr->location);
     }
-    std::string elem_type = gen_type(expr->type->element_type);
-
-    size_t count = expr->elements.size();
-    size_t storage_count = count == 0 ? 1 : count;
     // Generate array declaration and initialization
     // Use static to ensure it persists beyond the current scope (important for struct fields)
-    emit("static " + elem_type + " " + temp + "[" + std::to_string(storage_count) + "] = {");
-    {
-        VoidCallGuard guard(*this, false);
-        for (size_t i = 0; i < count; i++) {
-            if (i > 0) emit(", ");
-            emit(gen_expr(expr->elements[i]));
-        }
-    }
-    emit("};");
+    std::string array_decl = gen_object_decl(expr->type,
+                                             temp,
+                                             expr->location,
+                                             "array literal temporary");
+    emit("static " + array_decl + " = " + gen_array_initializer(expr) + ";");
 
     if (ptr_kind_for_expr(expr) == PtrKind::Far) {
         std::string mod = current_module_id_expr.empty() ? "0" : current_module_id_expr;
@@ -1042,21 +1053,11 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
 
         // For array declarations, we need to handle the literal specially
         if (var_type && var_type->kind == Type::Kind::Array && expr->right->kind == Expr::Kind::ArrayLiteral) {
-            // Generate array literal inline with correct type
-            std::string elem_type = gen_type(var_type->element_type);
-
-            // Get array size
-            std::string size_str = std::to_string(resolve_array_length(var_type, expr->location));
-
-            emit(elem_type + " " + var_name + "[" + size_str + "] = {");
-            {
-                VoidCallGuard guard(*this, false);
-                for (size_t i = 0; i < expr->right->elements.size(); i++) {
-                    if (i > 0) emit(", ");
-                    emit(gen_expr(expr->right->elements[i]));
-                }
-            }
-            emit("};");
+            emit(gen_object_decl(var_type,
+                                 var_name,
+                                 expr->location,
+                                 "array declaration '" + expr->left->name + "'") +
+                 " = " + gen_array_initializer(expr->right) + ";");
 
             std::string temp = fresh_temp();
             if (!declared_temps.count(temp)) {
@@ -1069,26 +1070,17 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         }
 
         if (var_type && var_type->kind == Type::Kind::Array) {
-            std::string elem_type = require_type(var_type->element_type,
-                                                 expr->location,
-                                                 "array declaration element type");
-            std::string size_str = std::to_string(resolve_array_length(var_type, expr->location));
-            emit(elem_type + " " + var_name + "[" + size_str + "];");
+            emit(gen_object_decl(var_type,
+                                 var_name,
+                                 expr->location,
+                                 "array declaration '" + expr->left->name + "'") + ";");
 
             std::string rhs;
             {
                 VoidCallGuard guard(*this, false);
                 rhs = gen_expr(expr->right);
             }
-
-            std::string idx = fresh_temp();
-            if (!declared_temps.count(idx)) {
-                emit(storage_prefix() + std::string("int ") + idx + ";");
-                declared_temps.insert(idx);
-            }
-            emit("for (" + idx + " = 0; " + idx + " < " + size_str + "; ++" + idx + ") {");
-            emit(var_name + "[" + idx + "] = " + rhs + "[" + idx + "];");
-            emit("}");
+            emit("memcpy(" + var_name + ", " + rhs + ", sizeof(" + var_name + "));");
 
             std::string temp = fresh_temp();
             if (!declared_temps.count(temp)) {
@@ -1149,15 +1141,7 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         }
     }
     if (lhs_type && lhs_type->kind == Type::Kind::Array) {
-        std::string size_str = std::to_string(resolve_array_length(lhs_type, expr->location));
-        std::string idx = fresh_temp();
-        if (!declared_temps.count(idx)) {
-            emit(storage_prefix() + std::string("int ") + idx + ";");
-            declared_temps.insert(idx);
-        }
-        emit("for (" + idx + " = 0; " + idx + " < " + size_str + "; ++" + idx + ") {");
-        emit(lhs + "[" + idx + "] = " + rhs + "[" + idx + "];");
-        emit("}");
+        emit("memcpy(" + lhs + ", " + rhs + ", sizeof(" + lhs + "));");
         std::string temp = fresh_temp();
         if (!declared_temps.count(temp)) {
             emit(storage_prefix() + std::string("int ") + temp + " = 0;");

@@ -71,6 +71,22 @@ if [[ -f megalinker/rom_vx_TABLE_UNUSED.c ]]; then
   echo "unused rom global should be elided"
   exit 1
 fi
+if ! rg -q "extern [^;]*vx_grid\\[2\\]\\[3\\];" out.h; then
+  echo "missing nested exported GRID shape in header"
+  exit 1
+fi
+if ! rg -q "extern [^;]*vx_rgb\\[2\\]\\[2\\]\\[3\\];" out.h; then
+  echo "missing nested exported RGB shape in header"
+  exit 1
+fi
+if ! rg -q "vx_grid\\[2\\]\\[3\\]" megalinker/rom_vx_grid.c; then
+  echo "missing nested GRID definition shape"
+  exit 1
+fi
+if ! rg -q "vx_rgb\\[2\\]\\[2\\]\\[3\\]" megalinker/rom_vx_rgb.c; then
+  echo "missing nested RGB definition shape"
+  exit 1
+fi
 if [[ ! -f megalinker/ram_globals.c ]]; then
   echo "missing ram globals"
   exit 1

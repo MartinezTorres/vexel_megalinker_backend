@@ -1087,10 +1087,19 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (info.scope_id >= 0) name += "_s" + std::to_string(info.scope_id);
         std::string mut = megalinker_semantics::mutability_prefix(analysis, info.sym, decl);
         if (decl->var_type && decl->var_type->kind == Type::Kind::Array) {
-            std::string elem_type = header_codegen.type_to_c(decl->var_type->element_type);
             int size_instance_id = info.sym ? info.sym->instance_id : entry_instance_id;
-            std::string size = array_size_str(analyzed, decl->var_type, size_instance_id, decl->location);
-            header_builder << "extern " << mut << elem_type << " " << name << "[" << size << "];\n";
+            TypePtr base = decl->var_type;
+            while (base && base->kind == Type::Kind::Array) {
+                base = base->element_type;
+            }
+            if (!base) {
+                throw CompileError("Array declaration has missing base element type", decl->location);
+            }
+            std::string decl_type = header_codegen.type_to_c(base) + " " + name;
+            for (TypePtr dim = decl->var_type; dim && dim->kind == Type::Kind::Array; dim = dim->element_type) {
+                decl_type += "[" + array_size_str(analyzed, dim, size_instance_id, decl->location) + "]";
+            }
+            header_builder << "extern " << mut << decl_type << ";\n";
         } else {
             if (!decl->var_type) {
                 throw CompileError("Internal error: global '" + decl->var_name +
