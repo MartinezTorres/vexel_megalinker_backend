@@ -1143,6 +1143,9 @@ static void print_megalinker_usage(std::ostream& os) {
     os << "  --inline-max-cost <n>  Max callee AST cost for hard inlining (default: 200)\n";
     os << "  --inline-max-depth <n>  Max nested hard-inline depth (default: 8)\n";
     os << "  --inline-max-expansions <n>  Max hard-inline expansions per function (default: 64)\n";
+    os << "  Notes: inline-first for internal calls; inlining is skipped for [[noinline]],\n";
+    os << "         recursive callees, explicit returns, and inline-limit violations.\n";
+    os << "         [[sdcccall(0|1)]] is valid only on ABI-visible functions (&^, &!).\n";
 }
 
 } // namespace
