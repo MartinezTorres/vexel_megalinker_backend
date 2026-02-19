@@ -19,7 +19,9 @@ cleanup() {
     "$SCRIPT_DIR/pref.analysis.txt" \
     "$SCRIPT_DIR/inline_default.vx" "$SCRIPT_DIR/inline_noinline.vx" \
     "$SCRIPT_DIR/inl.c" "$SCRIPT_DIR/inl.h" "$SCRIPT_DIR/inl__runtime.c" \
-    "$SCRIPT_DIR/noinl.c" "$SCRIPT_DIR/noinl.h" "$SCRIPT_DIR/noinl__runtime.c"
+    "$SCRIPT_DIR/noinl.c" "$SCRIPT_DIR/noinl.h" "$SCRIPT_DIR/noinl__runtime.c" \
+    "$SCRIPT_DIR/sdcc.c" "$SCRIPT_DIR/sdcc.h" "$SCRIPT_DIR/sdcc__runtime.c" \
+    "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx"
   rm -rf "$SCRIPT_DIR/megalinker"
 }
 trap cleanup EXIT
@@ -235,6 +237,79 @@ if ! rg -q "^__nonbanked void vx_makev\\(vx_Vec\\* __vx_out\\)" wrap__runtime.c;
 fi
 if rg -q "return vx_makev__reent__from_entry__pA\\(" wrap__runtime.c; then
   echo "exported struct wrapper must not return lowered aggregate call"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/sdcccall_ok.vx" <<'EOF'
+[[sdcccall(0)]]
+&!ext_add(a:#i32, b:#i32) -> #i32;
+
+[[sdcccall(1)]]
+&^entry(x:#i32) -> #i32 {
+  ext_add(x, 1)
+}
+
+&^main() -> #i32 {
+  entry(2)
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_ok.vx" \
+  >/tmp/megalinker_sdcccall_ok.out 2>/tmp/megalinker_sdcccall_ok.err; then
+  cat /tmp/megalinker_sdcccall_ok.out /tmp/megalinker_sdcccall_ok.err
+  echo "sdcccall ABI annotation case failed to compile"
+  exit 1
+fi
+if ! rg -Uq "int32_t vx_ext_add\\([\\s\\S]*\\) __sdcccall\\(0\\);" sdcc.h; then
+  echo "missing __sdcccall(0) on external function prototype"
+  exit 1
+fi
+if ! rg -q "^__nonbanked int32_t vx_entry\\(int32_t vx_x\\) __sdcccall\\(1\\);" sdcc.h; then
+  echo "missing __sdcccall(1) on exported wrapper prototype"
+  exit 1
+fi
+if ! rg -q "^__nonbanked int32_t vx_entry\\(int32_t vx_x\\) __sdcccall\\(1\\) \\{" sdcc__runtime.c; then
+  echo "missing __sdcccall(1) on exported wrapper definition"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/sdcccall_bad_scope.vx" <<'EOF'
+[[sdcccall(1)]]
+&helper(x:#i32) -> #i32 {
+  x + 1
+}
+
+&^main() -> #i32 {
+  helper(0)
+}
+EOF
+
+if "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_scope.vx" \
+  >/tmp/megalinker_sdcccall_bad_scope.out 2>/tmp/megalinker_sdcccall_bad_scope.err; then
+  echo "sdcccall on non-ABI function should be rejected"
+  exit 1
+fi
+if ! rg -q "\\[\\[sdcccall\\]\\] is only valid on ABI-visible functions" /tmp/megalinker_sdcccall_bad_scope.err; then
+  cat /tmp/megalinker_sdcccall_bad_scope.out /tmp/megalinker_sdcccall_bad_scope.err
+  echo "missing clear scope error for sdcccall"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/sdcccall_bad_arg.vx" <<'EOF'
+[[sdcccall(2)]]
+&^main() -> #i32 {
+  0
+}
+EOF
+
+if "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
+  >/tmp/megalinker_sdcccall_bad_arg.out 2>/tmp/megalinker_sdcccall_bad_arg.err; then
+  echo "sdcccall with invalid argument should be rejected"
+  exit 1
+fi
+if ! rg -q "\\[\\[sdcccall\\]\\] argument must be 0 or 1" /tmp/megalinker_sdcccall_bad_arg.err; then
+  cat /tmp/megalinker_sdcccall_bad_arg.out /tmp/megalinker_sdcccall_bad_arg.err
+  echo "missing clear argument error for sdcccall"
   exit 1
 fi
 

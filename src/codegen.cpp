@@ -13,6 +13,7 @@
 #include <tuple>
 #include <sstream>
 #include <deque>
+#include <optional>
 
 namespace {
 std::string escape_c_string(const std::string& input) {
@@ -68,6 +69,34 @@ static std::string render_annotation_comment(const std::vector<Annotation>& anns
         os << "]]";
     }
     return os.str();
+}
+
+static std::string render_sdcccall_suffix(const StmtPtr& stmt) {
+    if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) return "";
+    std::optional<int> mode;
+    for (const auto& ann : stmt->annotations) {
+        if (ann.name != "sdcccall") continue;
+        if (ann.args.size() != 1) {
+            throw CompileError("Megalinker backend: [[sdcccall]] requires exactly one argument (0 or 1)",
+                               ann.location);
+        }
+        int parsed = -1;
+        if (ann.args[0] == "0") {
+            parsed = 0;
+        } else if (ann.args[0] == "1") {
+            parsed = 1;
+        } else {
+            throw CompileError("Megalinker backend: [[sdcccall]] argument must be 0 or 1",
+                               ann.location);
+        }
+        if (mode && *mode != parsed) {
+            throw CompileError("Megalinker backend: conflicting [[sdcccall]] annotations on the same function",
+                               ann.location);
+        }
+        mode = parsed;
+    }
+    if (!mode.has_value()) return "";
+    return " __sdcccall(" + std::to_string(*mode) + ")";
 }
 
 static std::string render_function_traits_comment(bool is_external,
@@ -525,7 +554,7 @@ void CodeGenerator::gen_module(const Module& mod) {
                                                      "' in external function '" + stmt->func_name + "'");
                     emit_header(ptype + " " + mangle_name(stmt->params[i].name));
                 }
-                emit_header(");");
+                emit_header(")" + render_sdcccall_suffix(stmt) + ";");
             }
         }
     });

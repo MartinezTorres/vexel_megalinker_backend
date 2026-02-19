@@ -14,6 +14,7 @@
 #include <iostream>
 #include <queue>
 #include <sstream>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -39,6 +40,48 @@ static void write_file(const std::string& path, const std::string& content) {
 
 static bool has_annotation(const std::vector<Annotation>& anns, const std::string& name) {
     return std::any_of(anns.begin(), anns.end(), [&](const Annotation& ann) { return ann.name == name; });
+}
+
+static std::optional<int> sdcccall_mode_for_function_decl(const StmtPtr& decl) {
+    if (!decl || decl->kind != Stmt::Kind::FuncDecl) return std::nullopt;
+
+    std::optional<int> mode;
+    for (const auto& ann : decl->annotations) {
+        if (ann.name != "sdcccall") continue;
+
+        if (!decl->is_external && !decl->is_exported) {
+            throw CompileError("Megalinker backend: [[sdcccall]] is only valid on ABI-visible functions (&! and &^)",
+                               ann.location);
+        }
+        if (ann.args.size() != 1) {
+            throw CompileError("Megalinker backend: [[sdcccall]] requires exactly one argument (0 or 1)",
+                               ann.location);
+        }
+
+        const std::string& arg = ann.args[0];
+        int parsed = -1;
+        if (arg == "0") {
+            parsed = 0;
+        } else if (arg == "1") {
+            parsed = 1;
+        } else {
+            throw CompileError("Megalinker backend: [[sdcccall]] argument must be 0 or 1",
+                               ann.location);
+        }
+
+        if (mode && *mode != parsed) {
+            throw CompileError("Megalinker backend: conflicting [[sdcccall]] annotations on the same function",
+                               ann.location);
+        }
+        mode = parsed;
+    }
+    return mode;
+}
+
+static std::string sdcccall_suffix_for_function_decl(const StmtPtr& decl) {
+    std::optional<int> mode = sdcccall_mode_for_function_decl(decl);
+    if (!mode.has_value()) return "";
+    return " __sdcccall(" + std::to_string(*mode) + ")";
 }
 
 static bool contains_named_struct_type(TypePtr type) {
@@ -104,6 +147,13 @@ static void validate_megalinker_external_function_abi(const Module& mod) {
                      "tuple return element type '" + (type ? type->to_string() : std::string("unknown")) + "'");
             }
         }
+    }
+}
+
+static void validate_megalinker_function_annotations(const Module& mod) {
+    for (const auto& stmt : mod.top_level) {
+        if (!stmt || stmt->kind != Stmt::Kind::FuncDecl) continue;
+        (void)sdcccall_mode_for_function_decl(stmt);
     }
 }
 
@@ -184,7 +234,8 @@ struct FunctionPrototype {
 
 static FunctionPrototype build_function_prototype(const GeneratedFunctionInfo& info,
                                                   const std::string& symbol_name,
-                                                  bool include_storage) {
+                                                  bool include_storage,
+                                                  const std::string& suffix = std::string()) {
     FunctionPrototype proto;
     proto.return_type = info.return_type.empty() ? "void" : info.return_type;
     proto.returns_void = info.returns_void;
@@ -204,7 +255,9 @@ static FunctionPrototype build_function_prototype(const GeneratedFunctionInfo& i
             proto.arg_list += info.params[i].name;
         }
     }
-    decl << ");";
+    decl << ")";
+    decl << suffix;
+    decl << ";";
     proto.declaration = decl.str();
     return proto;
 }
@@ -1114,9 +1167,11 @@ static void emit_megalinker_backend(const BackendInput& input) {
     if (analyzed.program) {
         for (const auto& mod_info : analyzed.program->modules) {
             validate_megalinker_external_function_abi(mod_info.module);
+            validate_megalinker_function_annotations(mod_info.module);
         }
     } else {
         validate_megalinker_external_function_abi(module);
+        validate_megalinker_function_annotations(module);
     }
 
     // Build a header with types only (no function prototypes)
@@ -1771,7 +1826,11 @@ static void emit_megalinker_backend(const BackendInput& input) {
         std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
         auto pit = variant_prototypes.find(entry->id);
         if (pit != variant_prototypes.end()) {
-            const FunctionPrototype wrapper_proto = build_function_prototype(entry->info, wrapper_name, false);
+            const FunctionPrototype wrapper_proto =
+                build_function_prototype(entry->info,
+                                         wrapper_name,
+                                         false,
+                                         sdcccall_suffix_for_function_decl(decl));
             header_builder << "__nonbanked " << wrapper_proto.declaration << "\n";
         }
     }
@@ -1896,7 +1955,11 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (!entry) continue;
 
         std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
-        FunctionPrototype wrapper_proto = build_function_prototype(entry->info, wrapper_name, false);
+        FunctionPrototype wrapper_proto =
+            build_function_prototype(entry->info,
+                                     wrapper_name,
+                                     false,
+                                     sdcccall_suffix_for_function_decl(decl));
         if (wrapper_proto.declaration.empty()) continue;
 
         // Build wrapper signature

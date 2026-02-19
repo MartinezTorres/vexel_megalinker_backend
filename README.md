@@ -53,6 +53,13 @@ Outputs:
 - Internal call variants are selected from frontend-provided reentrancy analysis; backend codegen does not recompute the graph.
 - Internal non-reentrant variants may use frame ABI; ABI boundaries remain native C ABI.
 
+## SDCC Calling Convention Hint
+- This backend recognizes `[[sdcccall(0)]]` and `[[sdcccall(1)]]` on ABI-visible functions only:
+  - exports (`&^`)
+  - extern/import boundaries (`&!`)
+- The annotation is emitted as SDCC `__sdcccall(0|1)` on the generated ABI declaration/definition.
+- Using `[[sdcccall(...)]]` on non-ABI functions is a backend error.
+
 ## Global Placement Hint
 - This backend recognizes `[[nonbanked]]` on global variables to force RAM placement (skip ROM banking).
 
