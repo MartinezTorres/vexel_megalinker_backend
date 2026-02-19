@@ -49,6 +49,8 @@ struct CallTargetInfo {
     std::string module_id_expr;
     char page = 'A';
     bool name_is_mangled = false;
+    bool inline_body = false;
+    std::string inline_variant_id;
 };
 
 struct CodegenABI {
@@ -156,6 +158,12 @@ private:
     std::string gen_binary(ExprPtr expr);
     std::string gen_unary(ExprPtr expr);
     std::string gen_call(ExprPtr expr);
+    std::string gen_inline_call(ExprPtr expr,
+                                Symbol* callee_sym,
+                                StmtPtr callee_decl,
+                                const std::string& ref_key,
+                                char call_reentrancy_key,
+                                const CallTargetInfo& target);
     std::string gen_index(ExprPtr expr);
     std::string gen_member(ExprPtr expr);
     std::string gen_array_initializer(ExprPtr expr);

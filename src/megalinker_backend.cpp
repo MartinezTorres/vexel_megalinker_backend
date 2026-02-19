@@ -276,6 +276,193 @@ static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
     }
 }
 
+static bool expr_has_explicit_return(ExprPtr expr);
+
+static bool stmt_has_explicit_return(StmtPtr stmt) {
+    if (!stmt) return false;
+    switch (stmt->kind) {
+        case Stmt::Kind::Return:
+            return true;
+        case Stmt::Kind::Expr:
+            return expr_has_explicit_return(stmt->expr);
+        case Stmt::Kind::VarDecl:
+            return expr_has_explicit_return(stmt->var_init);
+        case Stmt::Kind::ConditionalStmt:
+            return expr_has_explicit_return(stmt->condition) ||
+                   stmt_has_explicit_return(stmt->true_stmt);
+        default:
+            return false;
+    }
+}
+
+static bool expr_has_explicit_return(ExprPtr expr) {
+    if (!expr) return false;
+    switch (expr->kind) {
+        case Expr::Kind::Block:
+            for (const auto& st : expr->statements) {
+                if (stmt_has_explicit_return(st)) return true;
+            }
+            return expr_has_explicit_return(expr->result_expr);
+        case Expr::Kind::Conditional:
+            return expr_has_explicit_return(expr->condition) ||
+                   expr_has_explicit_return(expr->true_expr) ||
+                   expr_has_explicit_return(expr->false_expr);
+        case Expr::Kind::Call:
+            for (const auto& rec : expr->receivers) {
+                if (expr_has_explicit_return(rec)) return true;
+            }
+            for (const auto& arg : expr->args) {
+                if (expr_has_explicit_return(arg)) return true;
+            }
+            return expr_has_explicit_return(expr->operand);
+        case Expr::Kind::Binary:
+            return expr_has_explicit_return(expr->left) || expr_has_explicit_return(expr->right);
+        case Expr::Kind::Unary:
+        case Expr::Kind::Cast:
+        case Expr::Kind::Length:
+            return expr_has_explicit_return(expr->operand);
+        case Expr::Kind::Index:
+            return expr_has_explicit_return(expr->left) || expr_has_explicit_return(expr->right);
+        case Expr::Kind::Member:
+            return expr_has_explicit_return(expr->operand);
+        case Expr::Kind::ArrayLiteral:
+        case Expr::Kind::TupleLiteral:
+            for (const auto& elem : expr->elements) {
+                if (expr_has_explicit_return(elem)) return true;
+            }
+            return false;
+        case Expr::Kind::Assignment:
+            return expr_has_explicit_return(expr->left) || expr_has_explicit_return(expr->right);
+        case Expr::Kind::Range:
+        case Expr::Kind::Iteration:
+        case Expr::Kind::Repeat:
+            return expr_has_explicit_return(expr->left) || expr_has_explicit_return(expr->right);
+        default:
+            return false;
+    }
+}
+
+static size_t expr_inline_cost(ExprPtr expr);
+
+static size_t stmt_inline_cost(StmtPtr stmt) {
+    if (!stmt) return 0;
+    size_t cost = 1;
+    switch (stmt->kind) {
+        case Stmt::Kind::Expr:
+            return cost + expr_inline_cost(stmt->expr);
+        case Stmt::Kind::VarDecl:
+            return cost + expr_inline_cost(stmt->var_init);
+        case Stmt::Kind::Return:
+            return cost + expr_inline_cost(stmt->return_expr);
+        case Stmt::Kind::ConditionalStmt:
+            return cost + expr_inline_cost(stmt->condition) + stmt_inline_cost(stmt->true_stmt);
+        default:
+            return cost;
+    }
+}
+
+static size_t expr_inline_cost(ExprPtr expr) {
+    if (!expr) return 0;
+    size_t cost = 1;
+    switch (expr->kind) {
+        case Expr::Kind::Call:
+            cost += 8;
+            for (const auto& rec : expr->receivers) cost += expr_inline_cost(rec);
+            for (const auto& arg : expr->args) cost += expr_inline_cost(arg);
+            cost += expr_inline_cost(expr->operand);
+            return cost;
+        case Expr::Kind::Iteration:
+        case Expr::Kind::Repeat:
+            cost += 4;
+            return cost + expr_inline_cost(expr->left) + expr_inline_cost(expr->right);
+        case Expr::Kind::Block:
+            for (const auto& st : expr->statements) cost += stmt_inline_cost(st);
+            return cost + expr_inline_cost(expr->result_expr);
+        case Expr::Kind::Conditional:
+            return cost + expr_inline_cost(expr->condition) +
+                   expr_inline_cost(expr->true_expr) + expr_inline_cost(expr->false_expr);
+        case Expr::Kind::Binary:
+            return cost + expr_inline_cost(expr->left) + expr_inline_cost(expr->right);
+        case Expr::Kind::Unary:
+        case Expr::Kind::Cast:
+        case Expr::Kind::Length:
+            return cost + expr_inline_cost(expr->operand);
+        case Expr::Kind::Index:
+            return cost + expr_inline_cost(expr->left) + expr_inline_cost(expr->right);
+        case Expr::Kind::Member:
+            return cost + expr_inline_cost(expr->operand);
+        case Expr::Kind::ArrayLiteral:
+        case Expr::Kind::TupleLiteral:
+            for (const auto& elem : expr->elements) cost += expr_inline_cost(elem);
+            return cost;
+        case Expr::Kind::Assignment:
+            return cost + expr_inline_cost(expr->left) + expr_inline_cost(expr->right);
+        case Expr::Kind::Range:
+            return cost + expr_inline_cost(expr->left) + expr_inline_cost(expr->right);
+        default:
+            return cost;
+    }
+}
+
+static std::unordered_set<std::string> compute_recursive_function_keys(
+    const std::unordered_map<std::string, std::unordered_set<std::string>>& edges) {
+    std::unordered_set<std::string> nodes;
+    for (const auto& kv : edges) {
+        nodes.insert(kv.first);
+        for (const auto& succ : kv.second) nodes.insert(succ);
+    }
+
+    std::unordered_map<std::string, std::unordered_set<std::string>> reverse;
+    for (const auto& kv : edges) {
+        reverse[kv.first];
+        for (const auto& succ : kv.second) {
+            reverse[succ].insert(kv.first);
+        }
+    }
+
+    std::unordered_set<std::string> visited;
+    std::vector<std::string> order;
+    std::function<void(const std::string&)> dfs1 = [&](const std::string& node) {
+        if (visited.count(node)) return;
+        visited.insert(node);
+        auto it = edges.find(node);
+        if (it != edges.end()) {
+            for (const auto& succ : it->second) dfs1(succ);
+        }
+        order.push_back(node);
+    };
+    for (const auto& node : nodes) dfs1(node);
+
+    visited.clear();
+    std::unordered_set<std::string> recursive;
+    std::function<void(const std::string&, std::vector<std::string>&)> dfs2 =
+        [&](const std::string& node, std::vector<std::string>& comp) {
+            if (visited.count(node)) return;
+            visited.insert(node);
+            comp.push_back(node);
+            auto it = reverse.find(node);
+            if (it == reverse.end()) return;
+            for (const auto& pred : it->second) dfs2(pred, comp);
+        };
+
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+        if (visited.count(*it)) continue;
+        std::vector<std::string> comp;
+        dfs2(*it, comp);
+        if (comp.size() > 1) {
+            for (const auto& node : comp) recursive.insert(node);
+            continue;
+        }
+        const std::string& node = comp.front();
+        auto edge_it = edges.find(node);
+        if (edge_it != edges.end() && edge_it->second.count(node)) {
+            recursive.insert(node);
+        }
+    }
+
+    return recursive;
+}
+
 static std::string array_size_str(const AnalyzedProgram& analyzed, TypePtr type,
                                   int instance_id,
                                   const SourceLocation& loc) {
@@ -426,6 +613,8 @@ struct Variant {
     std::string c_name;
     std::string module_name;
     GeneratedFunctionInfo info;
+    size_t inline_depth = 0;
+    bool emit_definition = true;
 };
 
 static std::string segment_expr(char page, const std::string& module) {
@@ -572,6 +761,69 @@ static bool parse_caller_limit_option(const std::unordered_map<std::string, std:
     return true;
 }
 
+struct InlineConfig {
+    bool inline_default = true;
+    size_t max_cost = 200;
+    size_t max_depth = 8;
+    size_t max_expansions = 64;
+};
+
+static bool parse_boolean_flag(const std::string& value, bool& out) {
+    if (value == "1" || value == "true" || value == "on" || value == "yes") {
+        out = true;
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "off" || value == "no") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool parse_positive_size_t(const std::string& value, size_t& out) {
+    if (value.empty()) return false;
+    char* end = nullptr;
+    long parsed = std::strtol(value.c_str(), &end, 10);
+    if (!end || *end != '\0' || parsed <= 0) {
+        return false;
+    }
+    out = static_cast<size_t>(parsed);
+    return true;
+}
+
+static bool parse_inline_default_option(const std::unordered_map<std::string, std::string>& opts,
+                                        bool& out) {
+    auto it = opts.find("inline_default");
+    if (it == opts.end()) return false;
+    if (!parse_boolean_flag(it->second, out)) {
+        throw CompileError("Megalinker backend: inline_default must be on/off (or true/false)",
+                           SourceLocation());
+    }
+    return true;
+}
+
+static bool parse_inline_size_option(const std::unordered_map<std::string, std::string>& opts,
+                                     const std::string& key,
+                                     size_t& out,
+                                     const std::string& error_label) {
+    auto it = opts.find(key);
+    if (it == opts.end()) return false;
+    if (!parse_positive_size_t(it->second, out)) {
+        throw CompileError("Megalinker backend: " + error_label + " must be a positive integer",
+                           SourceLocation());
+    }
+    return true;
+}
+
+static InlineConfig load_inline_config(const std::unordered_map<std::string, std::string>& opts) {
+    InlineConfig cfg;
+    (void)parse_inline_default_option(opts, cfg.inline_default);
+    (void)parse_inline_size_option(opts, "inline_max_cost", cfg.max_cost, "inline_max_cost");
+    (void)parse_inline_size_option(opts, "inline_max_depth", cfg.max_depth, "inline_max_depth");
+    (void)parse_inline_size_option(opts, "inline_max_expansions", cfg.max_expansions, "inline_max_expansions");
+    return cfg;
+}
+
 static bool is_valid_symbol_prefix(const std::string& value) {
     if (value.empty()) return false;
     unsigned char first = static_cast<unsigned char>(value.front());
@@ -598,14 +850,29 @@ static bool parse_internal_prefix_option(const std::unordered_map<std::string, s
 }
 
 static bool parse_positive_int_option(const std::string& value, std::string& error) {
-    if (value.empty()) {
+    size_t ignored = 0;
+    if (!parse_positive_size_t(value, ignored)) {
         error = "Megalinker backend: --caller-limit requires a positive integer";
         return false;
     }
-    char* end = nullptr;
-    long parsed = std::strtol(value.c_str(), &end, 10);
-    if (!end || *end != '\0' || parsed <= 0) {
-        error = "Megalinker backend: --caller-limit requires a positive integer";
+    return true;
+}
+
+static bool parse_inline_default_arg(const std::string& value, std::string& error) {
+    bool ignored = false;
+    if (!parse_boolean_flag(value, ignored)) {
+        error = "Megalinker backend: --inline-default requires on/off (or true/false)";
+        return false;
+    }
+    return true;
+}
+
+static bool parse_inline_positive_arg(const std::string& value,
+                                      const std::string& flag,
+                                      std::string& error) {
+    size_t ignored = 0;
+    if (!parse_positive_size_t(value, ignored)) {
+        error = "Megalinker backend: " + flag + " requires a positive integer";
         return false;
     }
     return true;
@@ -621,7 +888,12 @@ static bool parse_internal_prefix_arg(const std::string& value, std::string& err
 
 static void validate_megalinker_backend_options(const Compiler::Options& options, std::string& error) {
     for (const auto& entry : options.backend_options) {
-        if (entry.first != "caller_limit" && entry.first != "internal_prefix") {
+        if (entry.first != "caller_limit" &&
+            entry.first != "internal_prefix" &&
+            entry.first != "inline_default" &&
+            entry.first != "inline_max_cost" &&
+            entry.first != "inline_max_depth" &&
+            entry.first != "inline_max_expansions") {
             error = "Megalinker backend: unknown backend option key '" + entry.first + "'";
             return;
         }
@@ -637,6 +909,34 @@ static void validate_megalinker_backend_options(const Compiler::Options& options
     auto prefix_it = options.backend_options.find("internal_prefix");
     if (prefix_it != options.backend_options.end()) {
         if (!parse_internal_prefix_arg(prefix_it->second, error)) {
+            return;
+        }
+    }
+
+    auto inline_default_it = options.backend_options.find("inline_default");
+    if (inline_default_it != options.backend_options.end()) {
+        if (!parse_inline_default_arg(inline_default_it->second, error)) {
+            return;
+        }
+    }
+
+    auto inline_cost_it = options.backend_options.find("inline_max_cost");
+    if (inline_cost_it != options.backend_options.end()) {
+        if (!parse_inline_positive_arg(inline_cost_it->second, "--inline-max-cost", error)) {
+            return;
+        }
+    }
+
+    auto inline_depth_it = options.backend_options.find("inline_max_depth");
+    if (inline_depth_it != options.backend_options.end()) {
+        if (!parse_inline_positive_arg(inline_depth_it->second, "--inline-max-depth", error)) {
+            return;
+        }
+    }
+
+    auto inline_exp_it = options.backend_options.find("inline_max_expansions");
+    if (inline_exp_it != options.backend_options.end()) {
+        if (!parse_inline_positive_arg(inline_exp_it->second, "--inline-max-expansions", error)) {
             return;
         }
     }
@@ -692,12 +992,104 @@ static bool parse_megalinker_option(int argc,
         options.backend_options["internal_prefix"] = value;
         return true;
     }
+    if (std::strcmp(arg, "--inline-default") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --inline-default requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_inline_default_arg(value, error)) {
+            return true;
+        }
+        options.backend_options["inline_default"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kInlineDefaultPrefix = "--inline-default=";
+    if (std::strncmp(arg, kInlineDefaultPrefix, std::strlen(kInlineDefaultPrefix)) == 0) {
+        std::string value = arg + std::strlen(kInlineDefaultPrefix);
+        if (!parse_inline_default_arg(value, error)) {
+            return true;
+        }
+        options.backend_options["inline_default"] = value;
+        return true;
+    }
+    if (std::strcmp(arg, "--inline-max-cost") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --inline-max-cost requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_inline_positive_arg(value, "--inline-max-cost", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_cost"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kInlineMaxCostPrefix = "--inline-max-cost=";
+    if (std::strncmp(arg, kInlineMaxCostPrefix, std::strlen(kInlineMaxCostPrefix)) == 0) {
+        std::string value = arg + std::strlen(kInlineMaxCostPrefix);
+        if (!parse_inline_positive_arg(value, "--inline-max-cost", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_cost"] = value;
+        return true;
+    }
+    if (std::strcmp(arg, "--inline-max-depth") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --inline-max-depth requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_inline_positive_arg(value, "--inline-max-depth", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_depth"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kInlineMaxDepthPrefix = "--inline-max-depth=";
+    if (std::strncmp(arg, kInlineMaxDepthPrefix, std::strlen(kInlineMaxDepthPrefix)) == 0) {
+        std::string value = arg + std::strlen(kInlineMaxDepthPrefix);
+        if (!parse_inline_positive_arg(value, "--inline-max-depth", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_depth"] = value;
+        return true;
+    }
+    if (std::strcmp(arg, "--inline-max-expansions") == 0) {
+        if (index + 1 >= argc) {
+            error = "Megalinker backend: --inline-max-expansions requires an argument";
+            return true;
+        }
+        std::string value = argv[index + 1];
+        if (!parse_inline_positive_arg(value, "--inline-max-expansions", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_expansions"] = value;
+        index++;
+        return true;
+    }
+    constexpr const char* kInlineMaxExpPrefix = "--inline-max-expansions=";
+    if (std::strncmp(arg, kInlineMaxExpPrefix, std::strlen(kInlineMaxExpPrefix)) == 0) {
+        std::string value = arg + std::strlen(kInlineMaxExpPrefix);
+        if (!parse_inline_positive_arg(value, "--inline-max-expansions", error)) {
+            return true;
+        }
+        options.backend_options["inline_max_expansions"] = value;
+        return true;
+    }
     return false;
 }
 
 static void print_megalinker_usage(std::ostream& os) {
     os << "  --caller-limit <n>  Caller-variant limit before nonbanked trampoline fallback (default: 10)\n";
     os << "  --internal-prefix <id>  Prefix for internal generated symbols (default: vx_)\n";
+    os << "  --inline-default <on|off>  Hard-inline internal calls by default (default: on)\n";
+    os << "  --inline-max-cost <n>  Max callee AST cost for hard inlining (default: 200)\n";
+    os << "  --inline-max-depth <n>  Max nested hard-inline depth (default: 8)\n";
+    os << "  --inline-max-expansions <n>  Max hard-inline expansions per function (default: 64)\n";
 }
 
 } // namespace
@@ -818,6 +1210,37 @@ static void emit_megalinker_backend(const BackendInput& input) {
         function_map[key] = info;
     }
 
+    InlineConfig inline_cfg = load_inline_config(input.options.backend_options);
+
+    std::unordered_map<std::string, std::unordered_set<std::string>> function_call_edges;
+    std::unordered_map<std::string, size_t> inline_cost_by_key;
+    std::unordered_map<std::string, bool> explicit_return_by_key;
+    for (const auto& kv : function_map) {
+        const std::string& key = kv.first;
+        const FunctionInfo& finfo = kv.second;
+        inline_cost_by_key[key] = expr_inline_cost(finfo.decl ? finfo.decl->body : nullptr);
+        explicit_return_by_key[key] = expr_has_explicit_return(finfo.decl ? finfo.decl->body : nullptr);
+
+        std::unordered_set<std::string> callees;
+        std::vector<ExprPtr> calls;
+        collect_call_exprs(finfo.decl ? finfo.decl->body : nullptr, calls);
+        for (const auto& call : calls) {
+            if (!call || !call->operand || call->operand->kind != Expr::Kind::Identifier) continue;
+            Symbol* callee_sym = bind_symbol(finfo.instance_id, call->operand.get());
+            if (!callee_sym || callee_sym->kind != Symbol::Kind::Function ||
+                callee_sym->is_external || !callee_sym->declaration) {
+                continue;
+            }
+            std::string callee_key = func_key_for(callee_sym, entry_instance_id);
+            if (function_map.count(callee_key)) {
+                callees.insert(callee_key);
+            }
+        }
+        function_call_edges[key] = std::move(callees);
+    }
+    std::unordered_set<std::string> recursive_function_keys =
+        compute_recursive_function_keys(function_call_edges);
+
     struct VariantBuildInfo {
         std::unordered_map<std::string, Variant> variants;
         std::unordered_map<std::string, std::unordered_map<const Expr*, std::string>> call_targets;
@@ -832,6 +1255,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
 
     size_t caller_limit = 10;
     (void)parse_caller_limit_option(input.options.backend_options, caller_limit);
+    std::unordered_map<std::string, size_t> inline_expansion_count;
+    std::unordered_set<std::string> inline_skip_warnings_emitted;
 
     std::queue<std::string> pending;
 
@@ -841,7 +1266,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
                            char reent_key,
                            const std::string& ref_key,
                            const std::vector<PtrKind>& param_kinds,
-                           char page) -> std::string {
+                           char page,
+                           bool emit_definition,
+                           size_t inline_depth) -> std::string {
         const StmtPtr& decl = info.decl;
         std::string pk = param_sig(decl, param_kinds);
         std::string sig_key = signature_key(func_key, reent_key, ref_key, pk);
@@ -860,6 +1287,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
                          "|pk" + pk + "|p" + std::string(1, page);
         auto it = build.variants.find(id);
         if (it != build.variants.end()) {
+            it->second.emit_definition = it->second.emit_definition || emit_definition;
+            it->second.inline_depth = std::min(it->second.inline_depth, inline_depth);
             return id;
         }
 
@@ -883,6 +1312,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
         v.reent_key = reent_key;
         v.param_kinds = param_kinds;
         v.page = page;
+        v.emit_definition = emit_definition;
+        v.inline_depth = inline_depth;
 
         std::string name = qualified_name(decl);
         name += (reent_key == 'R') ? "__reent" : "__nonreent";
@@ -899,6 +1330,12 @@ static void emit_megalinker_backend(const BackendInput& input) {
         std::string suffix = (info.scope_id >= 0) ? "_s" + std::to_string(info.scope_id) : "";
         v.c_name = header_codegen.mangle(name) + suffix;
         v.module_name = v.c_name;
+        if (!emit_definition && !caller_id.empty()) {
+            auto caller_it = build.variants.find(caller_id);
+            if (caller_it != build.variants.end()) {
+                v.module_name = caller_it->second.module_name;
+            }
+        }
 
         size_t param_idx = 0;
         for (const auto& param : decl->params) {
@@ -938,7 +1375,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
                     param_kinds.push_back(PtrKind::Ram);
                 }
             }
-            (void)add_variant(func_key, info, "", reent_key, ref_key, param_kinds, 'A');
+            (void)add_variant(func_key, info, "", reent_key, ref_key, param_kinds, 'A', true, 0);
         }
     }
 
@@ -988,6 +1425,77 @@ static void emit_megalinker_backend(const BackendInput& input) {
                 arg_idx++;
             }
 
+            bool hard_inline = inline_cfg.inline_default;
+            std::string inline_skip_reason;
+            if (hard_inline) {
+                if (has_annotation(sym->declaration->annotations, "noinline")) {
+                    hard_inline = false;
+                    inline_skip_reason = "annotated [[noinline]]";
+                } else if (recursive_function_keys.count(callee_key)) {
+                    hard_inline = false;
+                    inline_skip_reason = "recursive function";
+                } else {
+                    auto ret_it = explicit_return_by_key.find(callee_key);
+                    if (ret_it != explicit_return_by_key.end() && ret_it->second) {
+                        hard_inline = false;
+                        inline_skip_reason = "explicit return statements";
+                    }
+                }
+                if (hard_inline) {
+                    auto cost_it = inline_cost_by_key.find(callee_key);
+                    size_t cost = (cost_it != inline_cost_by_key.end()) ? cost_it->second : 0;
+                    if (cost > inline_cfg.max_cost) {
+                        hard_inline = false;
+                        inline_skip_reason = "cost " + std::to_string(cost) + " > " +
+                                             std::to_string(inline_cfg.max_cost);
+                    }
+                }
+                if (hard_inline && (variant.inline_depth + 1 > inline_cfg.max_depth)) {
+                    hard_inline = false;
+                    inline_skip_reason = "depth " + std::to_string(variant.inline_depth + 1) + " > " +
+                                         std::to_string(inline_cfg.max_depth);
+                }
+                if (hard_inline && inline_expansion_count[callee_key] >= inline_cfg.max_expansions) {
+                    hard_inline = false;
+                    inline_skip_reason = "expansions " +
+                                         std::to_string(inline_expansion_count[callee_key]) + " >= " +
+                                         std::to_string(inline_cfg.max_expansions);
+                }
+            }
+
+            if (!hard_inline && inline_cfg.inline_default &&
+                !inline_skip_reason.empty() && inline_skip_reason != "annotated [[noinline]]") {
+                std::string warn_key = callee_key + "|" + inline_skip_reason;
+                if (inline_skip_warnings_emitted.insert(warn_key).second) {
+                    if (input.options.verbose) {
+                        std::cout << "Megalinker: not inlining "
+                                  << qualified_name(sym->declaration) << " (" << inline_skip_reason << ")\n";
+                    } else {
+                        std::cerr << "Megalinker: info: not inlining "
+                                  << qualified_name(sym->declaration) << " (" << inline_skip_reason << ")\n";
+                    }
+                }
+            }
+
+            if (hard_inline) {
+                std::string callee_id = add_variant(callee_key,
+                                                    f_it->second,
+                                                    variant.id,
+                                                    desired_reent,
+                                                    desired_ref,
+                                                    param_kinds,
+                                                    variant.page,
+                                                    false,
+                                                    variant.inline_depth + 1);
+                CallTargetInfo info;
+                info.inline_body = true;
+                info.inline_variant_id = callee_id;
+                info.page = variant.page;
+                build.call_overrides[variant.id][call.get()] = info;
+                inline_expansion_count[callee_key]++;
+                continue;
+            }
+
             std::string pk = param_sig(sym->declaration, param_kinds);
             std::string sig_key = signature_key(callee_key, desired_reent, desired_ref, pk);
 
@@ -1016,7 +1524,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
                     std::string tramp_name = trampoline_name(sym->declaration, desired_reent, desired_ref, pk);
                     build.trampoline_names[sig_key] = header_codegen.mangle(tramp_name);
                     std::string tramp_id = add_variant(callee_key, f_it->second, "", desired_reent,
-                                                       desired_ref, param_kinds, 'A');
+                                                       desired_ref, param_kinds, 'A', true, 0);
                     build.trampoline_variants[sig_key] = tramp_id;
                 }
                 CallTargetInfo info;
@@ -1030,7 +1538,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
 
             char callee_page = (variant.page == 'A') ? 'B' : 'A';
             std::string callee_id = add_variant(callee_key, f_it->second, variant.id,
-                                                desired_reent, desired_ref, param_kinds, callee_page);
+                                                desired_reent, desired_ref, param_kinds, callee_page, true, 0);
             build.call_targets[variant.id][call.get()] = callee_id;
         }
     }
@@ -1041,6 +1549,10 @@ static void emit_megalinker_backend(const BackendInput& input) {
         bool alters = false;
         auto ct = build.call_targets.find(id);
         if (ct != build.call_targets.end() && !ct->second.empty()) {
+            alters = true;
+        }
+        auto co = build.call_overrides.find(id);
+        if (!alters && co != build.call_overrides.end() && !co->second.empty()) {
             alters = true;
         }
         if (!alters && variant.decl && variant.decl->body) {
@@ -1112,7 +1624,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
     // Segment declarations for all modules
     std::unordered_set<std::string> module_names;
     for (const auto& id : build.order) {
-        module_names.insert(build.variants[id].module_name);
+        const Variant& variant = build.variants[id];
+        if (!variant.emit_definition) continue;
+        module_names.insert(variant.module_name);
     }
     for (const auto& kv : globals) {
         if (kv.second.is_rom) {
@@ -1128,6 +1642,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     std::unordered_map<std::string, FunctionPrototype> variant_prototypes;
     for (const auto& id : build.order) {
         Variant& variant = build.variants[id];
+        if (!variant.emit_definition) continue;
         CodegenABI abi;
         abi.lower_aggregates = true;
         abi.multi_file_globals = true;
@@ -1246,7 +1761,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         Variant* entry = nullptr;
         for (const auto& id : build.order) {
             Variant& v = build.variants[id];
-            if (v.decl == decl && v.page == 'A') {
+            if (v.emit_definition && v.decl == decl && v.page == 'A') {
                 entry = &v;
                 break;
             }
@@ -1266,6 +1781,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     // Emit function files
     for (const auto& id : build.order) {
         Variant& variant = build.variants[id];
+        if (!variant.emit_definition) continue;
         std::ostringstream body;
         body << "// page " << (variant.page == 'A' ? "A" : "B") << "\n";
         body << variant.info.code << "\n";
@@ -1372,7 +1888,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
         Variant* entry = nullptr;
         for (const auto& id : build.order) {
             Variant& v = build.variants[id];
-            if (v.decl == decl && v.page == 'A') {
+            if (v.emit_definition && v.decl == decl && v.page == 'A') {
                 entry = &v;
                 break;
             }
@@ -1414,7 +1930,7 @@ void register_backend_megalinker() {
     Backend backend;
     backend.info.name = "megalinker";
     backend.info.description = "Megalinker banked backend";
-    backend.info.version = "v0.3.0";
+    backend.info.version = "v0.4.0";
     backend.emit = emit_megalinker_backend;
     backend.analysis_requirements = megalinker_analysis_requirements;
     backend.boundary_reentrancy_mode = megalinker_boundary_reentrancy_mode;

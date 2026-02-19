@@ -16,7 +16,10 @@ cleanup() {
     "$SCRIPT_DIR/wrap.c" "$SCRIPT_DIR/wrap.h" "$SCRIPT_DIR/wrap__runtime.c" \
     "$SCRIPT_DIR/wrap_void.vx" "$SCRIPT_DIR/wrap_struct.vx" \
     "$SCRIPT_DIR/pref.c" "$SCRIPT_DIR/pref.h" "$SCRIPT_DIR/pref__runtime.c" \
-    "$SCRIPT_DIR/pref.analysis.txt"
+    "$SCRIPT_DIR/pref.analysis.txt" \
+    "$SCRIPT_DIR/inline_default.vx" "$SCRIPT_DIR/inline_noinline.vx" \
+    "$SCRIPT_DIR/inl.c" "$SCRIPT_DIR/inl.h" "$SCRIPT_DIR/inl__runtime.c" \
+    "$SCRIPT_DIR/noinl.c" "$SCRIPT_DIR/noinl.h" "$SCRIPT_DIR/noinl__runtime.c"
   rm -rf "$SCRIPT_DIR/megalinker"
 }
 trap cleanup EXIT
@@ -181,6 +184,7 @@ fi
 
 cat > "$SCRIPT_DIR/wrap_void.vx" <<'EOF'
 G:#i32;
+[[noinline]]
 &set1() { G = 1; }
 &caller1() { set1(); }
 &caller2() { set1(); }
@@ -249,6 +253,55 @@ if ! rg -q "^__nonbanked int32_t vx_entry_add\\(" pref__runtime.c; then
 fi
 if rg -q "^__nonbanked int32_t mltest_entry_add\\(" pref__runtime.c; then
   echo "internal prefix leaked into exported symbol"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/inline_default.vx" <<'EOF'
+G:#i32;
+&inline_target(x:#i32) -> #i32 { x + 1 }
+&^main() -> #i32 {
+  G = 41;
+  inline_target(G)
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o inl "$SCRIPT_DIR/inline_default.vx" \
+  >/tmp/megalinker_inline_default.out 2>/tmp/megalinker_inline_default.err; then
+  cat /tmp/megalinker_inline_default.out /tmp/megalinker_inline_default.err
+  echo "inline-default case failed to compile"
+  exit 1
+fi
+if find megalinker -maxdepth 1 -type f -name 'vx_inline_target*.c' | grep -q .; then
+  echo "inline-default should not emit a standalone inline_target function file"
+  exit 1
+fi
+if rg -q "vx_inline_target" inl.h inl__runtime.c megalinker/*.c; then
+  echo "inline-default should eliminate direct symbol usage for inline_target"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/inline_noinline.vx" <<'EOF'
+G:#i32;
+[[noinline]]
+&forced_target(x:#i32) -> #i32 { x + 1 }
+&^main() -> #i32 {
+  G = 41;
+  forced_target(G)
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o noinl "$SCRIPT_DIR/inline_noinline.vx" \
+  >/tmp/megalinker_inline_noinline.out 2>/tmp/megalinker_inline_noinline.err; then
+  cat /tmp/megalinker_inline_noinline.out /tmp/megalinker_inline_noinline.err
+  echo "noinline case failed to compile"
+  exit 1
+fi
+if ! find megalinker -maxdepth 1 -type f -name 'vx_forced_target*.c' | grep -q .; then
+  echo "noinline function must emit a standalone function file"
+  exit 1
+fi
+if ! rg -q "vx_forced_target" noinl__runtime.c megalinker/*.c; then
+  echo "noinline function symbol should be referenced in generated output"
   exit 1
 fi
 

@@ -27,6 +27,15 @@ Outputs:
 - Immutable globals are emitted one-per-symbol under `megalinker/rom_<name>.c`; mutable/runtime-initialized globals go to `megalinker/ram_globals.c`.
 - Dead declarations are not emitted; generated output contains only live globals/functions.
 - Bank-switching is emitted as direct segment assignments (no helper macros required).
+- Inline-first policy:
+  - Internal calls are hard-inlined by default (backend inlining, not C `inline`).
+  - `[[noinline]]` on a function forces symbol emission and call-based lowering.
+  - Recursive functions and functions with explicit `->` return statements are kept as calls.
+  - Inlining limits are configurable:
+    - `--inline-default <on|off>` (default `on`)
+    - `--inline-max-cost <n>` (default `200`)
+    - `--inline-max-depth <n>` (default `8`)
+    - `--inline-max-expansions <n>` (default `64`)
 - Caller explosion protection: if a function signature has too many distinct callers, calls are routed through a `__nonbanked` trampoline that saves/restores both pages. Default limit is 10 and can be configured with:
   - `--backend-opt caller_limit=<n>`
 - Internal symbol prefixing (to avoid link collisions across multiple Vexel units in one C codebase):

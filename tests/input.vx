@@ -5,6 +5,7 @@ TABLE_UNUSED:#i32[1] = [99];
 ^rgb = [ [ [2, 3, 4], [5, 6, 7] ], [ [8, 9, 10], [11, 12, 13] ] ];
 GM:#i32;
 
+[[noinline]]
 &reader() -> #i32 {
   GM = GM + 1;
   idx:#i32 = GM < 3 ? GM : 0;
@@ -12,15 +13,18 @@ GM:#i32;
   x + GM
 }
 
+[[noinline]]
 &callee(n:#i32) -> #i32 {
   idx:#i32 = n < 2 ? n : 0;
   n + GM + TABLE2[idx]
 }
 
+[[noinline]]
 &caller1() -> #i32 {
   reader() + callee(1)
 }
 
+[[noinline]]
 &caller2() -> #i32 {
   callee(2)
 }

@@ -325,6 +325,216 @@ std::string CodeGenerator::gen_unary(ExprPtr expr) {
     return tmp;
 }
 
+std::string CodeGenerator::gen_inline_call(ExprPtr expr,
+                                           Symbol* callee_sym,
+                                           StmtPtr callee_decl,
+                                           const std::string& ref_key,
+                                           char call_reentrancy_key,
+                                           const CallTargetInfo& target) {
+    if (!callee_decl || !callee_decl->body) {
+        return "";
+    }
+
+    struct InlineStateGuard {
+        CodeGenerator& gen;
+        std::unordered_map<std::string, ExprPtr> expr_subs;
+        std::unordered_map<std::string, std::string> value_repls;
+        std::unordered_set<std::string> ref_params;
+        std::unordered_set<std::string> agg_params;
+        std::string variant_id;
+        char reent_key;
+        std::string func_key;
+        const Symbol* func_symbol;
+        int instance_id;
+        char bank_page;
+        std::string module_id_expr;
+
+        explicit InlineStateGuard(CodeGenerator& g)
+            : gen(g),
+              expr_subs(g.expr_param_substitutions),
+              value_repls(g.value_param_replacements),
+              ref_params(g.current_ref_params),
+              agg_params(g.current_aggregate_params),
+              variant_id(g.current_variant_id),
+              reent_key(g.current_reentrancy_key),
+              func_key(g.current_func_key),
+              func_symbol(g.current_func_symbol),
+              instance_id(g.current_instance_id),
+              bank_page(g.current_bank_page),
+              module_id_expr(g.current_module_id_expr) {}
+
+        ~InlineStateGuard() {
+            gen.expr_param_substitutions = std::move(expr_subs);
+            gen.value_param_replacements = std::move(value_repls);
+            gen.current_ref_params = std::move(ref_params);
+            gen.current_aggregate_params = std::move(agg_params);
+            gen.current_variant_id = std::move(variant_id);
+            gen.current_reentrancy_key = reent_key;
+            gen.current_func_key = std::move(func_key);
+            gen.current_func_symbol = func_symbol;
+            gen.current_instance_id = instance_id;
+            gen.current_bank_page = bank_page;
+            gen.current_module_id_expr = std::move(module_id_expr);
+        }
+    } guard(*this);
+
+    expr_param_substitutions.clear();
+    value_param_replacements.clear();
+    current_ref_params.clear();
+    current_aggregate_params.clear();
+    current_reentrancy_key = call_reentrancy_key;
+    if (callee_sym) {
+        current_func_key = func_key_for(callee_sym);
+        current_func_symbol = callee_sym;
+        current_instance_id = callee_sym->instance_id;
+    }
+    if (!target.inline_variant_id.empty()) {
+        current_variant_id = target.inline_variant_id;
+    }
+    current_bank_page = target.page;
+
+    auto fresh_inline_slot = [&]() -> std::string {
+        return "__vx_inl_" + std::to_string(temp_counter++);
+    };
+
+    // Bind receiver parameters.
+    for (size_t i = 0; i < callee_decl->ref_params.size(); ++i) {
+        if (i >= expr->receivers.size()) break;
+        ExprPtr rec = expr->receivers[i];
+        const std::string& param_name = callee_decl->ref_params[i];
+        TypePtr rec_type = (i < callee_decl->ref_param_types.size()) ? callee_decl->ref_param_types[i] : rec->type;
+
+        bool by_ref = receiver_is_mutable_arg(rec);
+        if (!ref_key.empty() && i < ref_key.size()) {
+            by_ref = ref_key[i] == 'M';
+        }
+        if (abi.lower_aggregates && rec_type && is_aggregate_type(rec_type)) {
+            by_ref = true;
+        }
+
+        std::string rec_expr;
+        {
+            VoidCallGuard rec_guard(*this, false);
+            rec_expr = gen_expr(rec);
+        }
+
+        if (by_ref) {
+            std::string ptr_expr;
+            if (is_addressable_lvalue(rec) && is_mutable_lvalue(rec)) {
+                if (!rec || !rec->type || rec->type->kind == Type::Kind::TypeVar) {
+                    ptr_expr = "&" + rec_expr;
+                } else {
+                    std::string ptr_temp = fresh_inline_slot();
+                    std::string rtype = gen_type(rec->type);
+                    emit(storage_prefix() + rtype + "* " + ptr_temp + " = &" + rec_expr + ";");
+                    ptr_expr = ptr_temp;
+                }
+            } else {
+                if (!rec || !rec->type) {
+                    throw CompileError("Missing receiver type for inline call",
+                                       rec ? rec->location : expr->location);
+                }
+                std::string val_temp = fresh_inline_slot();
+                std::string rtype = gen_type(rec->type);
+                emit(storage_prefix() + rtype + " " + val_temp + " = " + rec_expr + ";");
+                ptr_expr = "&" + val_temp;
+            }
+
+            std::string slot = fresh_inline_slot();
+            std::string slot_type = rec_type ? gen_type(rec_type) : "void";
+            if (slot_type == "void") slot_type = "void*";
+            emit(storage_prefix() + slot_type + "* " + slot + " = " + ptr_expr + ";");
+            value_param_replacements[param_name] = "(*" + slot + ")";
+        } else {
+            if (!rec || !rec->type || rec->type->kind == Type::Kind::TypeVar) {
+                value_param_replacements[param_name] = rec_expr;
+            } else {
+                std::string slot = fresh_inline_slot();
+                std::string slot_type = c_type_for_expr(rec);
+                emit(storage_prefix() + slot_type + " " + slot + " = " + rec_expr + ";");
+                value_param_replacements[param_name] = slot;
+            }
+        }
+    }
+
+    // Bind regular parameters.
+    size_t arg_idx = 0;
+    for (size_t i = 0; i < callee_decl->params.size(); ++i) {
+        const auto& param = callee_decl->params[i];
+        ExprPtr arg_expr_node = (arg_idx < expr->args.size()) ? expr->args[arg_idx] : nullptr;
+        arg_idx++;
+
+        if (param.is_expression_param) {
+            if (arg_expr_node) {
+                expr_param_substitutions[param.name] = arg_expr_node;
+            }
+            continue;
+        }
+
+        bool by_ref = abi.lower_aggregates && param.type && is_aggregate_type(param.type);
+
+        std::string arg_expr;
+        {
+            VoidCallGuard arg_guard(*this, false);
+            arg_expr = arg_expr_node ? gen_expr(arg_expr_node) : std::string();
+        }
+
+        if (by_ref) {
+            std::string ptr_expr;
+            if (arg_expr_node && is_addressable_lvalue(arg_expr_node)) {
+                if (!arg_expr_node->type || arg_expr_node->type->kind == Type::Kind::TypeVar) {
+                    ptr_expr = "&" + arg_expr;
+                } else {
+                    std::string ptr_temp = fresh_inline_slot();
+                    std::string atype = gen_type(arg_expr_node->type);
+                    emit(storage_prefix() + atype + "* " + ptr_temp + " = &" + arg_expr + ";");
+                    ptr_expr = ptr_temp;
+                }
+            } else {
+                if (!arg_expr_node || !arg_expr_node->type) {
+                    throw CompileError("Missing argument type for inline call",
+                                       arg_expr_node ? arg_expr_node->location : expr->location);
+                }
+                std::string val_temp = fresh_inline_slot();
+                std::string atype = gen_type(arg_expr_node->type);
+                emit(storage_prefix() + atype + " " + val_temp + " = " + arg_expr + ";");
+                ptr_expr = "&" + val_temp;
+            }
+
+            std::string slot = fresh_inline_slot();
+            std::string slot_type = param.type ? gen_type(param.type) : "void";
+            if (slot_type == "void") slot_type = "void*";
+            emit(storage_prefix() + slot_type + "* " + slot + " = " + ptr_expr + ";");
+            value_param_replacements[param.name] = "(*" + slot + ")";
+        } else {
+            if (arg_expr_node && arg_expr_node->type && arg_expr_node->type->kind != Type::Kind::TypeVar) {
+                std::string slot = fresh_inline_slot();
+                std::string slot_type = c_type_for_expr(arg_expr_node);
+                emit(storage_prefix() + slot_type + " " + slot + " = " + arg_expr + ";");
+                value_param_replacements[param.name] = slot;
+            } else {
+                value_param_replacements[param.name] = arg_expr;
+            }
+        }
+    }
+
+    std::string result;
+    if (allow_void_call) {
+        VoidCallGuard body_guard(*this, true);
+        result = gen_expr(callee_decl->body);
+        if (!result.empty()) {
+            emit(result + ";");
+        }
+        return "";
+    }
+
+    {
+        VoidCallGuard body_guard(*this, false);
+        result = gen_expr(callee_decl->body);
+    }
+    return result;
+}
+
 std::string CodeGenerator::gen_call(ExprPtr expr) {
     // Check if this is a type constructor call
     if (expr->operand && expr->operand->kind == Expr::Kind::Identifier &&
@@ -478,6 +688,10 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
             }
             func_name += instance_suffix(sym);
         }
+    }
+
+    if (target.inline_body && callee_decl && !is_external) {
+        return gen_inline_call(expr, sym, callee_decl, ref_key, call_reentrancy_key, target);
     }
 
     bool returns_aggregate = false;
