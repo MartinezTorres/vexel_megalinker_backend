@@ -41,6 +41,72 @@ static bool has_annotation(const std::vector<Annotation>& anns, const std::strin
     return std::any_of(anns.begin(), anns.end(), [&](const Annotation& ann) { return ann.name == name; });
 }
 
+static bool contains_named_struct_type(TypePtr type) {
+    if (!type) return false;
+    switch (type->kind) {
+        case Type::Kind::Named:
+            return true;
+        case Type::Kind::Array:
+            return contains_named_struct_type(type->element_type);
+        case Type::Kind::TypeOf:
+            if (type->typeof_expr && type->typeof_expr->type) {
+                return contains_named_struct_type(type->typeof_expr->type);
+            }
+            return false;
+        default:
+            return false;
+    }
+}
+
+static void validate_megalinker_external_function_abi(const Module& mod) {
+    auto fail = [](const StmtPtr& stmt, const SourceLocation& loc, const std::string& detail) {
+        std::string name;
+        if (stmt) {
+            if (!stmt->type_namespace.empty()) {
+                name = stmt->type_namespace + "::" + stmt->func_name;
+            } else {
+                name = stmt->func_name;
+            }
+        }
+        if (name.empty()) name = "<anonymous>";
+        throw CompileError("Megalinker backend does not support named-struct " + detail +
+                               " on external function '" + name + "'",
+                           loc);
+    };
+
+    for (const auto& stmt : mod.top_level) {
+        if (!stmt || stmt->kind != Stmt::Kind::FuncDecl || !stmt->is_external) continue;
+
+        for (size_t i = 0; i < stmt->ref_param_types.size() && i < stmt->ref_params.size(); ++i) {
+            TypePtr type = stmt->ref_param_types[i];
+            if (contains_named_struct_type(type)) {
+                fail(stmt,
+                     type ? type->location : stmt->location,
+                     "receiver type '" + (type ? type->to_string() : std::string("unknown")) + "'");
+            }
+        }
+        for (const auto& param : stmt->params) {
+            if (contains_named_struct_type(param.type)) {
+                fail(stmt,
+                     param.type ? param.type->location : param.location,
+                     "parameter type '" + (param.type ? param.type->to_string() : std::string("unknown")) + "'");
+            }
+        }
+        if (contains_named_struct_type(stmt->return_type)) {
+            fail(stmt,
+                 stmt->return_type ? stmt->return_type->location : stmt->location,
+                 "return type '" + (stmt->return_type ? stmt->return_type->to_string() : std::string("unknown")) + "'");
+        }
+        for (const auto& type : stmt->return_types) {
+            if (contains_named_struct_type(type)) {
+                fail(stmt,
+                     type ? type->location : stmt->location,
+                     "tuple return element type '" + (type ? type->to_string() : std::string("unknown")) + "'");
+            }
+        }
+    }
+}
+
 static BackendAnalysisRequirements megalinker_analysis_requirements(const Compiler::Options&,
                                                                     std::string&) {
     BackendAnalysisRequirements req;
@@ -109,128 +175,38 @@ static std::string sanitize_tag(const std::string& input) {
     return out;
 }
 
-static std::string strip_static(const std::string& input) {
-    std::string out = input;
-    for (;;) {
-        size_t pos = out.find("static ");
-        if (pos == std::string::npos) break;
-        out.erase(pos, 7);
-    }
-    return out;
-}
+struct FunctionPrototype {
+    std::string declaration;
+    std::string arg_list;
+    std::string return_type;
+    bool returns_void = true;
+};
 
-static std::string replace_identifier_token(const std::string& input,
-                                            const std::string& from,
-                                            const std::string& to) {
-    std::string out;
-    out.reserve(input.size());
-    for (size_t i = 0; i < input.size();) {
-        unsigned char c = static_cast<unsigned char>(input[i]);
-        if (std::isalnum(c) || c == '_') {
-            size_t j = i;
-            while (j < input.size()) {
-                unsigned char d = static_cast<unsigned char>(input[j]);
-                if (!std::isalnum(d) && d != '_') break;
-                j++;
-            }
-            std::string token = input.substr(i, j - i);
-            if (token == from) {
-                out += to;
-            } else {
-                out += token;
-            }
-            i = j;
-        } else {
-            out.push_back(input[i]);
-            i++;
+static FunctionPrototype build_function_prototype(const GeneratedFunctionInfo& info,
+                                                  const std::string& symbol_name,
+                                                  bool include_storage) {
+    FunctionPrototype proto;
+    proto.return_type = info.return_type.empty() ? "void" : info.return_type;
+    proto.returns_void = info.returns_void;
+
+    std::ostringstream decl;
+    if (include_storage) {
+        decl << info.storage;
+    }
+    decl << proto.return_type << " " << symbol_name << "(";
+    if (info.params.empty()) {
+        decl << "void";
+    } else {
+        for (size_t i = 0; i < info.params.size(); ++i) {
+            if (i > 0) decl << ", ";
+            decl << info.params[i].type << " " << info.params[i].name;
+            if (i > 0) proto.arg_list += ", ";
+            proto.arg_list += info.params[i].name;
         }
     }
-    return out;
-}
-
-static std::string build_arg_list_from_proto(const std::string& proto) {
-    size_t lparen = proto.find('(');
-    size_t rparen = proto.rfind(')');
-    if (lparen == std::string::npos || rparen == std::string::npos || rparen <= lparen) {
-        return "";
-    }
-    std::string params = proto.substr(lparen + 1, rparen - lparen - 1);
-    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
-    while (!params.empty() && is_space(static_cast<unsigned char>(params.front()))) params.erase(params.begin());
-    while (!params.empty() && is_space(static_cast<unsigned char>(params.back()))) params.pop_back();
-    if (params.empty() || params == "void") return "";
-
-    std::vector<std::string> names;
-    size_t start = 0;
-    while (start < params.size()) {
-        size_t comma = params.find(',', start);
-        std::string part = (comma == std::string::npos) ? params.substr(start) : params.substr(start, comma - start);
-        start = (comma == std::string::npos) ? params.size() : comma + 1;
-
-        // trim
-        size_t p0 = part.find_first_not_of(" \t\r\n");
-        size_t p1 = part.find_last_not_of(" \t\r\n");
-        if (p0 == std::string::npos) continue;
-        part = part.substr(p0, p1 - p0 + 1);
-
-        // find last identifier token
-        size_t i = part.size();
-        while (i > 0 && !(std::isalnum(static_cast<unsigned char>(part[i - 1])) || part[i - 1] == '_')) i--;
-        size_t end = i;
-        while (i > 0 && (std::isalnum(static_cast<unsigned char>(part[i - 1])) || part[i - 1] == '_')) i--;
-        if (end > i) {
-            names.push_back(part.substr(i, end - i));
-        }
-    }
-
-    std::ostringstream oss;
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (i > 0) oss << ", ";
-        oss << names[i];
-    }
-    return oss.str();
-}
-
-static std::string trim_copy(const std::string& input) {
-    size_t start = input.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    size_t end = input.find_last_not_of(" \t\r\n");
-    return input.substr(start, end - start + 1);
-}
-
-static bool find_identifier_token(const std::string& input,
-                                  const std::string& token,
-                                  size_t& out_start,
-                                  size_t& out_end) {
-    for (size_t i = 0; i < input.size();) {
-        unsigned char c = static_cast<unsigned char>(input[i]);
-        if (std::isalnum(c) || c == '_') {
-            size_t j = i;
-            while (j < input.size()) {
-                unsigned char d = static_cast<unsigned char>(input[j]);
-                if (!std::isalnum(d) && d != '_') break;
-                j++;
-            }
-            if (input.compare(i, j - i, token) == 0) {
-                out_start = i;
-                out_end = j;
-                return true;
-            }
-            i = j;
-        } else {
-            i++;
-        }
-    }
-    return false;
-}
-
-static std::string extract_return_type(const std::string& proto, const std::string& func_name) {
-    size_t start = 0;
-    size_t end = 0;
-    if (!find_identifier_token(proto, func_name, start, end)) {
-        return "";
-    }
-    return trim_copy(proto.substr(0, start));
+    decl << ");";
+    proto.declaration = decl.str();
+    return proto;
 }
 
 static void collect_call_exprs(ExprPtr expr, std::vector<ExprPtr>& calls) {
@@ -742,6 +718,15 @@ static void emit_megalinker_backend(const BackendInput& input) {
     const Module& module = *analyzed.module;
     const AnalysisFacts& analysis = *analyzed.analysis;
 
+    // Backend ABI policy: external function boundaries never carry named structs.
+    if (analyzed.program) {
+        for (const auto& mod_info : analyzed.program->modules) {
+            validate_megalinker_external_function_abi(mod_info.module);
+        }
+    } else {
+        validate_megalinker_external_function_abi(module);
+    }
+
     // Build a header with types only (no function prototypes)
     AnalysisFacts header_facts = analysis;
     header_facts.reachable_functions.clear();
@@ -1139,8 +1124,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
         header_builder << "extern const uint8_t __ML_SEGMENT_B_" << mod << ";\n";
     }
 
-    // Generate function prototypes from variant definitions
-    std::unordered_map<std::string, std::string> variant_prototypes;
+    // Generate function prototypes from variant ABI signatures.
+    std::unordered_map<std::string, FunctionPrototype> variant_prototypes;
     for (const auto& id : build.order) {
         Variant& variant = build.variants[id];
         CodegenABI abi;
@@ -1229,19 +1214,13 @@ static void emit_megalinker_backend(const BackendInput& input) {
         variant.info = gen.generate_single_function(module, variant.decl, analyzed, abi, variant.instance_id,
                                                     variant.ref_key, variant.reent_key,
                                                     variant.name, variant.id);
-
-        size_t brace = variant.info.code.find('{');
-        if (brace != std::string::npos) {
-            std::string proto = variant.info.code.substr(0, brace);
-            while (!proto.empty() && std::isspace(static_cast<unsigned char>(proto.back()))) proto.pop_back();
-            variant_prototypes[id] = proto + ";";
-        }
+        variant_prototypes[id] = build_function_prototype(variant.info, variant.c_name, false);
     }
 
     for (const auto& id : build.order) {
         auto it = variant_prototypes.find(id);
         if (it != variant_prototypes.end()) {
-            header_builder << strip_static(it->second) << "\n";
+            header_builder << it->second.declaration << "\n";
         }
     }
 
@@ -1253,9 +1232,8 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (pit == variant_prototypes.end()) continue;
         auto nit = build.trampoline_names.find(sig_key);
         if (nit == build.trampoline_names.end()) continue;
-        std::string proto = replace_identifier_token(pit->second, build.variants[variant_id].c_name, nit->second);
-        proto = strip_static(proto);
-        header_builder << "__nonbanked " << proto << "\n";
+        const FunctionPrototype tramp_proto = build_function_prototype(build.variants[variant_id].info, nit->second, false);
+        header_builder << "__nonbanked " << tramp_proto.declaration << "\n";
     }
 
     // Exported wrappers
@@ -1276,11 +1254,10 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (!entry) continue;
 
         std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
-        std::string proto = variant_prototypes[entry->id];
-        if (!proto.empty()) {
-            std::string replaced = replace_identifier_token(proto, entry->c_name, wrapper_name);
-            replaced = strip_static(replaced);
-            header_builder << "__nonbanked " << replaced << "\n";
+        auto pit = variant_prototypes.find(entry->id);
+        if (pit != variant_prototypes.end()) {
+            const FunctionPrototype wrapper_proto = build_function_prototype(entry->info, wrapper_name, false);
+            header_builder << "__nonbanked " << wrapper_proto.declaration << "\n";
         }
     }
 
@@ -1362,16 +1339,9 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (nit == build.trampoline_names.end()) continue;
 
         Variant& target = build.variants[variant_id];
-        std::string proto = pit->second;
-        proto = replace_identifier_token(proto, target.c_name, nit->second);
-        proto = strip_static(proto);
-
-        std::string args = build_arg_list_from_proto(proto);
-        std::string ret_type = extract_return_type(proto, nit->second);
-        std::string ret_trim = trim_copy(ret_type);
-        bool returns_void = ret_trim.empty() || ret_trim == "void";
-
-        std::string sig = "__nonbanked " + proto;
+        FunctionPrototype tramp_proto = build_function_prototype(target.info, nit->second, false);
+        std::string args = tramp_proto.arg_list;
+        std::string sig = "__nonbanked " + tramp_proto.declaration;
         size_t semi = sig.rfind(';');
         if (semi != std::string::npos) sig.erase(semi, 1);
         runtime << sig << " {\n";
@@ -1379,14 +1349,14 @@ static void emit_megalinker_backend(const BackendInput& input) {
         runtime << "  uint8_t old_b = __ML_address_b;\n";
         runtime << "  " << (target.page == 'A' ? load_module_a_fn : load_module_b_fn) << "("
                 << segment_expr(target.page, target.module_name) << ");\n";
-        if (returns_void) {
+        if (tramp_proto.returns_void) {
             runtime << "  " << target.c_name << "(" << args << ");\n";
         } else {
-            runtime << "  " << ret_type << " result = " << target.c_name << "(" << args << ");\n";
+            runtime << "  " << tramp_proto.return_type << " result = " << target.c_name << "(" << args << ");\n";
         }
         runtime << "  __ML_address_a = old_a;\n";
         runtime << "  __ML_address_b = old_b;\n";
-        if (returns_void) {
+        if (tramp_proto.returns_void) {
             runtime << "  return;\n";
         } else {
             runtime << "  return result;\n";
@@ -1410,35 +1380,26 @@ static void emit_megalinker_backend(const BackendInput& input) {
         if (!entry) continue;
 
         std::string wrapper_name = header_codegen.mangle_export(qualified_name(decl));
-        std::string proto = variant_prototypes[entry->id];
-        if (proto.empty()) continue;
-
-        proto = replace_identifier_token(proto, entry->c_name, wrapper_name);
-        proto = strip_static(proto);
+        FunctionPrototype wrapper_proto = build_function_prototype(entry->info, wrapper_name, false);
+        if (wrapper_proto.declaration.empty()) continue;
 
         // Build wrapper signature
         std::string sig;
-        sig.reserve(proto.size() + 32);
+        sig.reserve(wrapper_proto.declaration.size() + 32);
         sig += "__nonbanked ";
-        sig += proto;
+        sig += wrapper_proto.declaration;
         // Replace prototype semicolon with body
         size_t semi = sig.rfind(';');
         if (semi != std::string::npos) sig.erase(semi, 1);
         sig += " {\n";
 
-        // Build argument list by parsing parameters from prototype
-        std::string args = build_arg_list_from_proto(proto);
+        std::string args = wrapper_proto.arg_list;
 
         runtime << sig;
         runtime << "  ";
         runtime << (entry->page == 'A' ? load_module_a_fn : load_module_b_fn) << "(";
         runtime << segment_expr(entry->page, entry->module_name) << ");\n";
-        bool returns_void = (entry->decl->return_types.empty() && !entry->decl->return_type);
-        if (returns_void && entry->decl->body && entry->decl->body->type) returns_void = false;
-        if (!entry->decl->return_types.empty()) returns_void = true;
-        if (entry->decl->return_type && entry->decl->return_type->kind == Type::Kind::Named) returns_void = true;
-
-        if (returns_void) {
+        if (wrapper_proto.returns_void) {
             runtime << "  " << entry->c_name << "(" << args << ");\n";
         } else {
             runtime << "  return " << entry->c_name << "(" << args << ");\n";

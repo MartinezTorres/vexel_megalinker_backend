@@ -17,11 +17,19 @@ struct CCodegenResult {
     std::string source;
 };
 
+struct GeneratedFunctionParam {
+    std::string type;
+    std::string name;
+};
+
 struct GeneratedFunctionInfo {
     StmtPtr declaration;
     std::string qualified_name;  // e.g., Vec::push
     std::string c_name;          // mangled C symbol
     std::string storage;         // "" or "static "
+    std::string return_type;     // effective C return type after lowering
+    std::vector<GeneratedFunctionParam> params;  // effective C parameter list after lowering
+    bool returns_void = true;
     std::string code;            // complete function definition text
 };
 

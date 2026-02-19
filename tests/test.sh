@@ -10,6 +10,11 @@ fi
 cleanup() {
   rm -f "$SCRIPT_DIR/out.c" "$SCRIPT_DIR/out.h" "$SCRIPT_DIR/out__runtime.c" \
     "$SCRIPT_DIR/out.analysis.txt" \
+    "$SCRIPT_DIR/bad.c" "$SCRIPT_DIR/bad.h" "$SCRIPT_DIR/bad__runtime.c" \
+    "$SCRIPT_DIR/struct_global.c" "$SCRIPT_DIR/struct_global.h" "$SCRIPT_DIR/struct_global__runtime.c" \
+    "$SCRIPT_DIR/bad_struct_import.vx" "$SCRIPT_DIR/struct_export_global.vx" \
+    "$SCRIPT_DIR/wrap.c" "$SCRIPT_DIR/wrap.h" "$SCRIPT_DIR/wrap__runtime.c" \
+    "$SCRIPT_DIR/wrap_void.vx" "$SCRIPT_DIR/wrap_struct.vx" \
     "$SCRIPT_DIR/pref.c" "$SCRIPT_DIR/pref.h" "$SCRIPT_DIR/pref__runtime.c" \
     "$SCRIPT_DIR/pref.analysis.txt"
   rm -rf "$SCRIPT_DIR/megalinker"
@@ -105,7 +110,7 @@ if ! rg --no-ignore -q "__tramp" megalinker; then
   exit 1
 fi
 
-reader_file="$(rg --no-ignore -l "reader" megalinker 2>/dev/null | head -n 1 || true)"
+reader_file="$(find megalinker -maxdepth 1 -type f -name 'vx_reader*.c' | head -n 1 || true)"
 if [[ -z "$reader_file" ]]; then
   echo "reader function not found"
   exit 1
@@ -132,6 +137,103 @@ if rg -q "VX_REENTRANT|VX_NON_REENTRANT|VX_ENTRYPOINT|VX_INLINE|VX_NOINLINE|VX_P
   exit 1
 fi
 
+cat > "$SCRIPT_DIR/bad_struct_import.vx" <<'EOF'
+#Vec(x:#i32, y:#i32);
+&!scale(v:#Vec, k:#i32) -> #Vec;
+&^main() -> #i32 {
+  p:#Vec = Vec(3, 4);
+  q:#Vec = scale(p, 2);
+  q.x + q.y
+}
+EOF
+
+if "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_struct_import.vx" \
+  >/tmp/megalinker_bad.out 2>/tmp/megalinker_bad.err; then
+  echo "named-struct external ABI should be rejected"
+  exit 1
+fi
+if ! rg -q "Megalinker backend does not support named-struct" /tmp/megalinker_bad.err; then
+  cat /tmp/megalinker_bad.out /tmp/megalinker_bad.err
+  echo "missing clear named-struct external ABI error"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/struct_export_global.vx" <<'EOF'
+#Pixel(r:#u8, g:#u8, b:#u8);
+^palette:#Pixel[2] = [Pixel(1, 2, 3), Pixel(4, 5, 6)];
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o struct_global "$SCRIPT_DIR/struct_export_global.vx" \
+  >/tmp/megalinker_struct_global.out 2>/tmp/megalinker_struct_global.err; then
+  cat /tmp/megalinker_struct_global.out /tmp/megalinker_struct_global.err
+  echo "exported named-struct globals should compile"
+  exit 1
+fi
+if ! rg -q "extern [^;]*vx_Pixel vx_palette\\[2\\];" struct_global.h; then
+  echo "missing exported named-struct global in header"
+  exit 1
+fi
+if ! rg -q "vx_Pixel vx_palette\\[2\\]" megalinker/rom_vx_palette.c; then
+  echo "missing exported named-struct global definition"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/wrap_void.vx" <<'EOF'
+G:#i32;
+&set1() { G = 1; }
+&caller1() { set1(); }
+&caller2() { set1(); }
+&^main() -> #i32 {
+  G = 0;
+  caller1();
+  caller2();
+  G
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker --backend-opt caller_limit=1 -o wrap "$SCRIPT_DIR/wrap_void.vx" \
+  >/tmp/megalinker_wrap_void.out 2>/tmp/megalinker_wrap_void.err; then
+  cat /tmp/megalinker_wrap_void.out /tmp/megalinker_wrap_void.err
+  echo "void trampoline case failed to compile"
+  exit 1
+fi
+if ! rg -q "^__nonbanked int32_t vx_set1__tramp__reent\\(void\\)" wrap__runtime.c; then
+  echo "missing canonical trampoline signature"
+  exit 1
+fi
+if ! rg -q "int32_t result = vx_set1__reent__from_entry__pA\\(\\);" wrap__runtime.c; then
+  echo "missing canonical trampoline return binding"
+  exit 1
+fi
+if rg -q "^\\s*// VEXEL: kind=function" wrap__runtime.c; then
+  echo "trampoline wrapper must not leak parsed trait comments into runtime"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/wrap_struct.vx" <<'EOF'
+#Vec(x:#i32, y:#i32);
+&^makev() -> #Vec {
+  Vec(1, 2)
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o wrap "$SCRIPT_DIR/wrap_struct.vx" \
+  >/tmp/megalinker_wrap_struct.out 2>/tmp/megalinker_wrap_struct.err; then
+  cat /tmp/megalinker_wrap_struct.out /tmp/megalinker_wrap_struct.err
+  echo "struct return wrapper case failed to compile"
+  exit 1
+fi
+if ! rg -q "^__nonbanked void vx_makev\\(vx_Vec\\* __vx_out\\)" wrap__runtime.c; then
+  echo "exported struct wrapper must use out-parameter signature"
+  exit 1
+fi
+if rg -q "return vx_makev__reent__from_entry__pA\\(" wrap__runtime.c; then
+  echo "exported struct wrapper must not return lowered aggregate call"
+  exit 1
+fi
+
 if ! "$ROOT/build/vexel" -b megalinker --internal-prefix mltest_ -o pref input.vx \
   >/tmp/megalinker_compile_pref.out 2>/tmp/megalinker_compile_pref.err; then
   cat /tmp/megalinker_compile_pref.out /tmp/megalinker_compile_pref.err
@@ -141,11 +243,11 @@ if ! rg -q "void mltest_load_module_id_a\\(uint8_t seg\\)" pref__runtime.c; then
   echo "missing prefixed runtime helper"
   exit 1
 fi
-if ! rg -q "^int32_t vx_entry_add\\(" pref__runtime.c; then
+if ! rg -q "^__nonbanked int32_t vx_entry_add\\(" pref__runtime.c; then
   echo "missing stable exported symbol with internal prefix option"
   exit 1
 fi
-if rg -q "^int32_t mltest_entry_add\\(" pref__runtime.c; then
+if rg -q "^__nonbanked int32_t mltest_entry_add\\(" pref__runtime.c; then
   echo "internal prefix leaked into exported symbol"
   exit 1
 fi

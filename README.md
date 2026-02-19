@@ -33,6 +33,9 @@ Outputs:
   - `--internal-prefix <id>` when using the unified `vexel` driver
   - `--backend-opt internal_prefix=<id>`
   - Exported entrypoints/exports keep their public symbol names; only internal generated symbols are prefixed.
+- Named-struct ABI policy:
+  - External/imported function boundaries (`&!`) do not support named-struct types in parameters/receivers/returns.
+  - Exported named-struct globals are supported.
 
 ## Reentrancy Contract (Key Behavior)
 - This backend explicitly recognizes `[[nonreentrant]]` on ABI-boundary functions (`&^` exports and `&!` externals).

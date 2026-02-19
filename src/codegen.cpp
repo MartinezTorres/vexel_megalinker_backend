@@ -1125,6 +1125,19 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
         frame_params.emplace_back(ptype, mangle_name(stmt->params[i].name));
     }
 
+    std::string signature_return_type = "void";
+    std::vector<GeneratedFunctionParam> signature_params;
+    if (!current_nonreentrant_frame_abi) {
+        signature_return_type = ret_type;
+        if (current_returns_aggregate) {
+            signature_params.push_back({aggregate_out_type + "*", aggregate_out_param});
+        }
+        for (const auto& param : frame_params) {
+            signature_params.push_back({param.first, param.second});
+        }
+    }
+    bool signature_returns_void = signature_return_type == "void";
+
     if (current_nonreentrant_frame_abi) {
         emit("");
         for (size_t i = 0; i < frame_params.size(); ++i) {
@@ -1276,6 +1289,9 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
         info.qualified_name = variant_id;
         info.c_name = codegen_name;
         info.storage = storage;
+        info.return_type = signature_return_type;
+        info.params = signature_params;
+        info.returns_void = signature_returns_void;
         info.code = func_code;
         generated_functions.push_back(std::move(info));
         body << func_code;
