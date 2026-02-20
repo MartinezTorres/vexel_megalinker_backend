@@ -186,6 +186,9 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
                 if (is_agg_param) {
                     return "(*" + name + ")";
                 }
+                if (sym && sym->is_backend_bound && sym->is_local) {
+                    return "(*" + name + "__ptr)";
+                }
                 return name;
             }
         case Expr::Kind::Binary:
@@ -1166,13 +1169,14 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
     if (expr->target_type && expr->target_type->kind == Type::Kind::Array &&
         expr->target_type->element_type &&
         expr->target_type->element_type->kind == Type::Kind::Primitive &&
-        expr->target_type->element_type->primitive == PrimitiveType::U8 &&
+        expr->target_type->element_type->primitive == PrimitiveType::UInt &&
+        expr->target_type->element_type->integer_bits == 8 &&
         expr->operand && expr->operand->type &&
         expr->operand->type->kind == Type::Kind::Primitive &&
         !is_float(expr->operand->type->primitive)) {
 
         int64_t length = resolve_array_length(expr->target_type, expr->location);
-        int bits = type_bits(expr->operand->type->primitive);
+        int64_t bits = type_bits(expr->operand->type->primitive, expr->operand->type->integer_bits);
         if (bits / 8 != length) {
             throw CompileError("Array length/type size mismatch in cast", expr->location);
         }

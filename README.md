@@ -22,10 +22,17 @@ Outputs:
 - `megalinker/*.c` (one file per function + globals)
 
 ## Notes
+- Frontend integers are parametric (`#iN`/`#uN`), but this backend currently accepts 8/16/32/64 widths for emitted C types.
 - Exported (`&^`) functions get a `__nonbanked` wrapper that targets a page-A entry variant.
 - Non-reentrant functions are alternated between page A and page B across the call graph.
 - Immutable globals are emitted one-per-symbol under `megalinker/rom_<name>.c`; mutable/runtime-initialized globals go to `megalinker/ram_globals.c`.
 - Dead declarations are not emitted; generated output contains only live globals/functions.
+- Global linkage forms:
+  - `!name:#T;` lowers as `extern` symbol declaration (top-level only).
+  - `!!name:#T;` lowers as address-backed lvalue:
+    - top-level: preprocessor dereference macro
+    - local: `volatile <T>* const <name>__ptr` plus dereferenced uses
+    - requires `[[addr(...)]]`/`[[address(...)]]` annotation.
 - Bank-switching is emitted as direct segment assignments (no helper macros required).
 - Inline-first policy:
   - Internal calls are hard-inlined by default (backend inlining, not C `inline`).

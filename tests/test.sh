@@ -21,7 +21,9 @@ cleanup() {
     "$SCRIPT_DIR/inl.c" "$SCRIPT_DIR/inl.h" "$SCRIPT_DIR/inl__runtime.c" \
     "$SCRIPT_DIR/noinl.c" "$SCRIPT_DIR/noinl.h" "$SCRIPT_DIR/noinl__runtime.c" \
     "$SCRIPT_DIR/sdcc.c" "$SCRIPT_DIR/sdcc.h" "$SCRIPT_DIR/sdcc__runtime.c" \
-    "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx"
+    "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
+    "$SCRIPT_DIR/linkage.c" "$SCRIPT_DIR/linkage.h" "$SCRIPT_DIR/linkage__runtime.c" \
+    "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx"
   rm -rf "$SCRIPT_DIR/megalinker"
 }
 trap cleanup EXIT
@@ -377,6 +379,55 @@ if ! find megalinker -maxdepth 1 -type f -name 'vx_forced_target*.c' | grep -q .
 fi
 if ! rg -q "vx_forced_target" noinl__runtime.c megalinker/*.c; then
   echo "noinline function symbol should be referenced in generated output"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/linkage.vx" <<'EOF'
+!PORT:#u8;
+[[addr(0x4001)]]
+!!CTRL:#u8;
+
+&^main() -> #i32 {
+  [[addr(0x4002)]]
+  !!data:#u8;
+  data = CTRL;
+  (#i32)data + (#i32)PORT
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o linkage "$SCRIPT_DIR/linkage.vx" \
+  >/tmp/megalinker_linkage.out 2>/tmp/megalinker_linkage.err; then
+  cat /tmp/megalinker_linkage.out /tmp/megalinker_linkage.err
+  echo "backend-bound linkage case failed to compile"
+  exit 1
+fi
+if ! rg -q "^extern uint8_t vx_PORT;" megalinker/ram_globals.c; then
+  echo "missing extern lowering for !PORT in ram globals unit"
+  exit 1
+fi
+if ! rg -q "^#define vx_CTRL .*0x4001" megalinker/ram_globals.c; then
+  echo "missing top-level backend-bound macro lowering"
+  exit 1
+fi
+if ! rg -q "volatile uint8_t\\* const vx_data__ptr = \\(volatile uint8_t\\*\\)\\(uintptr_t\\)\\(0x4002\\);" megalinker/vx_main__reent__from_entry__pA.c; then
+  echo "missing local backend-bound pointer lowering"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/bad_width.vx" <<'EOF'
+&^main() -> #u13 {
+  7
+}
+EOF
+
+if "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_width.vx" \
+  >/tmp/megalinker_bad_width.out 2>/tmp/megalinker_bad_width.err; then
+  echo "unsupported #u13 width should be rejected by megalinker backend"
+  exit 1
+fi
+if ! rg -q "Megalinker backend supports unsigned integer widths 8/16/32/64 only" /tmp/megalinker_bad_width.err; then
+  cat /tmp/megalinker_bad_width.out /tmp/megalinker_bad_width.err
+  echo "missing clear unsupported-width error"
   exit 1
 fi
 
