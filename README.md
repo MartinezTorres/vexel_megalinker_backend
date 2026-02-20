@@ -1,7 +1,7 @@
 # Vexel Megalinker Backend (experimental)
 
 This backend emits banked-style C output meant to be consumed by SDCC + Megalinker.
-It is intentionally kept out-of-tree to exercise the backend plugin interface.
+It is kept under `backends/ext` to exercise the backend plugin interface.
 
 ## Build
 ```
