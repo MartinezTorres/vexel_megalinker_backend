@@ -188,6 +188,7 @@ private:
     std::string reentrancy_variant_name(const std::string& func_name, const Symbol* func_sym, char reent_key) const;
     std::string variant_name(const std::string& func_name, const Symbol* func_sym, char reent_key, const std::string& ref_key) const;
     bool receiver_is_mutable_arg(ExprPtr expr) const;
+    bool can_emit_static_initializer_expr(ExprPtr expr) const;
     bool lookup_constexpr_value(ExprPtr expr, CTValue& out) const;
     bool constexpr_condition(ExprPtr expr, bool& out) const;
     int fact_instance_id_for_expr(ExprPtr expr) const;
