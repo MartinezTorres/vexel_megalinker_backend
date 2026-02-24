@@ -1250,8 +1250,12 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
 }
 
 std::string CodeGenerator::gen_assignment(ExprPtr expr) {
+    const std::string assign_op = expr->op.empty() ? "=" : expr->op;
     // Use the flag set by the typechecker to determine if this creates a new variable
     if (expr->creates_new_variable) {
+        if (assign_op != "=") {
+            throw CompileError("Internal error: compound assignment cannot declare a new variable", expr->location);
+        }
         TypePtr var_type = expr->left->type ? expr->left->type : expr->type;
         Symbol* decl_sym = binding_for(expr->left);
         if ((!var_type || var_type->kind != Type::Kind::Array) &&
@@ -1339,15 +1343,6 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         FoldGuard lhs_guard(*this, false);
         lhs = gen_expr(expr->left);
     }
-    {
-        VoidCallGuard guard(*this, false);
-        rhs = gen_expr(expr->right);
-    }
-    // Release RHS temp if it's a temporary
-    if (rhs.rfind("tmp", 0) == 0 &&
-        (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
-        release_temp(rhs);
-    }
 
     TypePtr lhs_type = expr->left ? expr->left->type : nullptr;
     if ((!lhs_type || lhs_type->kind != Type::Kind::Array) &&
@@ -1358,6 +1353,76 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
             }
         }
     }
+
+    if (assign_op == "&&=" || assign_op == "||=") {
+        if (!lhs_type || lhs_type->kind != Type::Kind::Primitive ||
+            lhs_type->primitive != PrimitiveType::Bool) {
+            throw CompileError("Internal error: logical compound assignment requires boolean lhs", expr->location);
+        }
+        std::string rhs;
+        std::ostringstream rhs_capture;
+        output_stack.push(&rhs_capture);
+        try {
+            VoidCallGuard guard(*this, false);
+            rhs = gen_expr(expr->right);
+        } catch (...) {
+            output_stack.pop();
+            throw;
+        }
+        output_stack.pop();
+
+        auto append_captured = [&](const std::string& code) {
+            if (code.empty()) return;
+            if (output_stack.empty()) {
+                output_stack.push(&body);
+            }
+            (*output_stack.top()) << code;
+        };
+
+        const std::string lhs_type_str = gen_type(lhs_type);
+        std::string ptr_tmp = fresh_temp();
+        if (!declared_temps.count(ptr_tmp)) {
+            emit(storage_prefix() + lhs_type_str + "* " + ptr_tmp + " = &(" + lhs + ");");
+            declared_temps.insert(ptr_tmp);
+        } else {
+            emit(ptr_tmp + " = &(" + lhs + ");");
+        }
+
+        emit(std::string("if (*") + ptr_tmp + ") {");
+        if (assign_op == "&&=") {
+            append_captured(rhs_capture.str());
+            emit(std::string("*") + ptr_tmp + " = " + rhs + ";");
+        } else {
+            emit(std::string("*") + ptr_tmp + " = 1;");
+        }
+        emit("} else {");
+        if (assign_op == "||=") {
+            append_captured(rhs_capture.str());
+            emit(std::string("*") + ptr_tmp + " = " + rhs + ";");
+        } else {
+            emit(std::string("*") + ptr_tmp + " = 0;");
+        }
+        emit("}");
+
+        std::string result_tmp = fresh_temp();
+        if (!declared_temps.count(result_tmp)) {
+            emit(storage_prefix() + lhs_type_str + " " + result_tmp + ";");
+            declared_temps.insert(result_tmp);
+        }
+        emit(result_tmp + " = *" + ptr_tmp + ";");
+        return result_tmp;
+    }
+
+    {
+        VoidCallGuard guard(*this, false);
+        rhs = gen_expr(expr->right);
+    }
+    // Release RHS temp if it's a temporary
+    if (rhs.rfind("tmp", 0) == 0 &&
+        (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
+        release_temp(rhs);
+    }
+
     if (lhs_type && lhs_type->kind == Type::Kind::Array) {
         emit("memcpy(" + lhs + ", " + rhs + ", sizeof(" + lhs + "));");
         std::string temp = fresh_temp();
@@ -1370,7 +1435,7 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         return temp;
     }
 
-    return "(" + lhs + " = " + rhs + ")";
+    return "(" + lhs + " " + assign_op + " " + rhs + ")";
 }
 
 std::optional<std::pair<int64_t, int64_t>> CodeGenerator::evaluate_range(ExprPtr range_expr) {
