@@ -415,19 +415,26 @@ if ! rg -q "volatile uint8_t\\* const vx_data__ptr = \\(volatile uint8_t\\*\\)\\
 fi
 
 cat > "$SCRIPT_DIR/bad_width.vx" <<'EOF'
-&^main() -> #u13 {
-  7
+&!seed() -> #u8;
+&^main() -> #i32 {
+  x:#u13 = (#u13)(seed());
+  x <<= (#u8)3;
+  (#i32)((#u8)x)
 }
 EOF
 
-if "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_width.vx" \
+if ! "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_width.vx" \
   >/tmp/megalinker_bad_width.out 2>/tmp/megalinker_bad_width.err; then
-  echo "unsupported #u13 width should be rejected by megalinker backend"
+  cat /tmp/megalinker_bad_width.out /tmp/megalinker_bad_width.err
+  echo "arbitrary-width integer lowering should compile in megalinker backend"
   exit 1
 fi
-if ! rg -q "Megalinker backend supports unsigned integer widths 8/16/32/64 only" /tmp/megalinker_bad_width.err; then
-  cat /tmp/megalinker_bad_width.out /tmp/megalinker_bad_width.err
-  echo "missing clear unsupported-width error"
+if ! rg --no-ignore -q "typedef struct \\{ unsigned char b\\[2\\]; \\} vx_u13_t;" megalinker/*.c; then
+  echo "missing helper-backed #u13 type in megalinker function units"
+  exit 1
+fi
+if ! rg -q "vx_ai_shl|vx_ai_udivmod|vx_ai_add" bad__runtime.c megalinker/*.c; then
+  echo "missing arbitrary-width helper usage in megalinker output"
   exit 1
 fi
 

@@ -22,7 +22,9 @@ Outputs:
 - `megalinker/*.c` (one file per function + globals)
 
 ## Notes
-- Frontend integers are parametric (`#iN`/`#uN`), but this backend currently accepts 8/16/32/64 widths for emitted C types.
+- Frontend integers are parametric (`#iN`/`#uN`).
+- Native fast path uses emitted C scalar types for widths `8/16/32/64`.
+- Other integer widths lower to backend-generated fixed-width byte structs plus helper routines (`vx_ai_*`) in generated C units.
 - Exported (`&^`) functions get a `__nonbanked` wrapper that targets a page-A entry variant.
 - Non-reentrant functions are alternated between page A and page B across the call graph.
 - Immutable globals are emitted one-per-symbol under `megalinker/rom_<name>.c`; mutable/runtime-initialized globals go to `megalinker/ram_globals.c`.

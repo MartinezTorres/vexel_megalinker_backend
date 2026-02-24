@@ -173,6 +173,10 @@ CCodegenResult CodeGenerator::generate(const Module& mod, const AnalyzedProgram&
     }
     comparator_cache.clear();
     comparator_definitions.clear();
+    extint_types_used.clear();
+    extint_runtime_needed = false;
+    extint_runtime_source.clear();
+    extint_header_defs.clear();
     while (!output_stack.empty()) output_stack.pop();
     output_stack.push(&body);
 
@@ -213,17 +217,23 @@ CCodegenResult CodeGenerator::generate(const Module& mod, const AnalyzedProgram&
     gen_module(mod);
 
     CCodegenResult result;
-    result.header = header.str();
-    if (comparator_definitions.empty()) {
-        result.source = body.str();
+    if (extint_header_defs.empty()) {
+        result.header = header.str();
     } else {
-        std::ostringstream combined;
-        for (const auto& helper : comparator_definitions) {
-            combined << helper << "\n";
-        }
-        combined << body.str();
-        result.source = combined.str();
+        std::ostringstream combined_header;
+        combined_header << extint_header_defs;
+        combined_header << header.str();
+        result.header = combined_header.str();
     }
+    std::ostringstream combined;
+    if (!extint_runtime_source.empty()) {
+        combined << extint_runtime_source << "\n";
+    }
+    for (const auto& helper : comparator_definitions) {
+        combined << helper << "\n";
+    }
+    combined << body.str();
+    result.source = combined.str();
     return result;
 }
 
@@ -275,6 +285,10 @@ GeneratedFunctionInfo CodeGenerator::generate_single_function(const Module& mod,
     }
     comparator_cache.clear();
     comparator_definitions.clear();
+    extint_types_used.clear();
+    extint_runtime_needed = false;
+    extint_runtime_source.clear();
+    extint_header_defs.clear();
     while (!output_stack.empty()) output_stack.pop();
     output_stack.push(&body);
     temp_counter = 0;
@@ -298,7 +312,18 @@ GeneratedFunctionInfo CodeGenerator::generate_single_function(const Module& mod,
     }
 
     if (!generated_functions.empty()) {
-        return generated_functions.back();
+        GeneratedFunctionInfo info = generated_functions.back();
+        if (!extint_header_defs.empty() || !extint_runtime_source.empty() || !comparator_definitions.empty()) {
+            std::ostringstream prelude;
+            if (!extint_header_defs.empty()) prelude << extint_header_defs << "\n";
+            if (!extint_runtime_source.empty()) prelude << extint_runtime_source << "\n";
+            for (const auto& helper : comparator_definitions) {
+                prelude << helper << "\n";
+            }
+            prelude << info.code;
+            info.code = prelude.str();
+        }
+        return info;
     }
     return GeneratedFunctionInfo{};
 }
@@ -1254,6 +1279,14 @@ void CodeGenerator::gen_func_decl(StmtPtr stmt, const std::string& ref_key, char
                 } else if (std::holds_alternative<uint64_t>(result)) {
                     emit_return_stmt(std::to_string(std::get<uint64_t>(result)));
                     handled_body = true;
+                } else if (std::holds_alternative<CTExactInt>(result) &&
+                           stmt->return_type && is_extended_integer_type(stmt->return_type)) {
+                    APInt exact;
+                    bool is_unsigned = false;
+                    if (ctvalue_to_apint_value(result, exact, is_unsigned)) {
+                        emit_return_stmt(emit_extint_const_initializer(stmt->return_type, exact, is_unsigned, stmt->location));
+                        handled_body = true;
+                    }
                 } else if (std::holds_alternative<bool>(result)) {
                     emit_return_stmt(std::string(std::get<bool>(result) ? "1" : "0"));
                     handled_body = true;
@@ -1460,19 +1493,35 @@ void CodeGenerator::gen_var_decl(StmtPtr stmt) {
                     if (count != declared) {
                         throw CompileError("Range length does not match declared array size", stmt->var_init->location);
                     }
+                    bool elem_extint = stmt->var_type && stmt->var_type->element_type &&
+                                      is_extended_integer_type(stmt->var_type->element_type);
                     init << storage << mutability << array_decl << " = {";
                     bool first = true;
                     if (start < end) {
                         for (int64_t i = start; i < end; ++i) {
                             if (!first) init << ", ";
                             first = false;
-                            init << i;
+                            if (elem_extint) {
+                                init << emit_extint_const_initializer(stmt->var_type->element_type,
+                                                                      APInt(i),
+                                                                      i >= 0,
+                                                                      stmt->var_init->location);
+                            } else {
+                                init << i;
+                            }
                         }
                     } else {
                         for (int64_t i = start; i > end; --i) {
                             if (!first) init << ", ";
                             first = false;
-                            init << i;
+                            if (elem_extint) {
+                                init << emit_extint_const_initializer(stmt->var_type->element_type,
+                                                                      APInt(i),
+                                                                      i >= 0,
+                                                                      stmt->var_init->location);
+                            } else {
+                                init << i;
+                            }
                         }
                     }
                     init << "};";
@@ -1552,6 +1601,24 @@ void CodeGenerator::gen_var_decl(StmtPtr stmt) {
                         }
                     }
                     init_val = std::to_string(val);
+                } else if (std::holds_alternative<CTExactInt>(result)) {
+                    APInt exact;
+                    bool is_unsigned = false;
+                    if (!ctvalue_to_apint_value(result, exact, is_unsigned)) {
+                        throw CompileError("Internal error: failed to read exact integer constant",
+                                           stmt->location);
+                    }
+                    if (is_extended_integer_type(stmt->var_type)) {
+                        init_val = emit_extint_const_initializer(stmt->var_type, exact, is_unsigned, stmt->location);
+                    } else if (exact.fits_i64()) {
+                        init_val = exact.to_string();
+                    } else if (exact.fits_u64()) {
+                        init_val = exact.to_string();
+                    } else {
+                        throw CompileError("Constant '" + stmt->var_name +
+                                           "' requires arbitrary-width integer backend lowering, but target type is not arbitrary-width",
+                                           stmt->location);
+                    }
                 } else if (std::holds_alternative<double>(result)) {
                     init_val = std::to_string(std::get<double>(result));
                 } else if (std::holds_alternative<bool>(result)) {
@@ -1803,6 +1870,7 @@ bool CodeGenerator::is_mutable_lvalue(ExprPtr expr) const {
 bool CodeGenerator::is_aggregate_type(TypePtr type) const {
     TypePtr resolved = resolve_type(type);
     if (!resolved) return false;
+    if (is_extended_integer_type(resolved)) return true;
     if (resolved->kind == Type::Kind::Named) return true;
     return false;
 }

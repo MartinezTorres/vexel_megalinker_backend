@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <tuple>
 #include <sstream>
 #include <deque>
@@ -56,9 +57,8 @@ std::string CodeGenerator::gen_type(TypePtr type) {
                         case 32: return "int32_t";
                         case 64: return "int64_t";
                         default:
-                            throw CompileError("Megalinker backend supports signed integer widths 8/16/32/64 only (found #" +
-                                               primitive_name(type->primitive, type->integer_bits) + ")",
-                                               type->location);
+                            ensure_extint_type(true, type->integer_bits);
+                            return extint_type_name(true, type->integer_bits);
                     }
                 case PrimitiveType::UInt:
                     switch (type->integer_bits) {
@@ -67,9 +67,8 @@ std::string CodeGenerator::gen_type(TypePtr type) {
                         case 32: return "uint32_t";
                         case 64: return "uint64_t";
                         default:
-                            throw CompileError("Megalinker backend supports unsigned integer widths 8/16/32/64 only (found #" +
-                                               primitive_name(type->primitive, type->integer_bits) + ")",
-                                               type->location);
+                            ensure_extint_type(false, type->integer_bits);
+                            return extint_type_name(false, type->integer_bits);
                     }
                 case PrimitiveType::F16: return "_Float16";
                 case PrimitiveType::F32: return "float";
@@ -186,10 +185,8 @@ std::string CodeGenerator::fresh_temp() {
 }
 
 void CodeGenerator::release_temp(const std::string& temp) {
-    if (live_temps.count(temp)) {
-        live_temps.erase(temp);
-        available_temps.push(temp);
-    }
+    (void)temp;
+    // Temp names are currently type-erased. Avoid invalid scalar reinit on reused struct temps.
 }
 
 void CodeGenerator::emit(const std::string& code) {
@@ -290,17 +287,32 @@ int64_t CodeGenerator::resolve_array_length(TypePtr type, const SourceLocation& 
     if (!lookup_constexpr_value(type->array_size, size_val)) {
         ExprPtr size_expr = type->array_size;
         if (size_expr && size_expr->kind == Expr::Kind::IntLiteral) {
+            if (size_expr->has_exact_int_val && size_expr->exact_int_val.fits_i64()) {
+                return size_expr->exact_int_val.to_i64();
+            }
+            if (size_expr->has_exact_int_val && size_expr->exact_int_val.fits_u64()) {
+                uint64_t u = size_expr->exact_int_val.to_u64();
+                if (u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                    throw CompileError("Array length exceeds backend host limit", loc);
+                }
+                return static_cast<int64_t>(u);
+            }
             return static_cast<int64_t>(size_expr->uint_val);
         }
         throw CompileError("Array length must be compile-time constant (frontend CTE fact missing)",
                            loc);
     }
 
-    if (std::holds_alternative<int64_t>(size_val)) {
-        return std::get<int64_t>(size_val);
+    int64_t out_i64 = 0;
+    if (ctvalue_to_i64_exact(size_val, out_i64)) {
+        return out_i64;
     }
-    if (std::holds_alternative<uint64_t>(size_val)) {
-        return static_cast<int64_t>(std::get<uint64_t>(size_val));
+    uint64_t out_u64 = 0;
+    if (ctvalue_to_u64_exact(size_val, out_u64)) {
+        if (out_u64 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            throw CompileError("Array length exceeds backend host limit", loc);
+        }
+        return static_cast<int64_t>(out_u64);
     }
 
     throw CompileError("Array length must be an integer constant", loc);
@@ -333,6 +345,17 @@ std::string CodeGenerator::ensure_comparator(TypePtr type) {
                 fn << "    if (cmp < 0) return -1;\n";
                 fn << "    if (cmp > 0) return 1;\n";
                 fn << "    return 0;\n";
+            } else if (is_extended_integer_type(type)) {
+                bool is_signed = false;
+                uint64_t bits = 0;
+                analyze_extint_type(type, is_signed, bits);
+                ensure_extint_type(is_signed, bits);
+                if (is_signed) {
+                    fn << "    return vx_ai_scmp(lhs.b, rhs.b, sizeof(lhs.b), "
+                       << static_cast<unsigned>(extint_sign_mask(bits)) << ");\n";
+                } else {
+                    fn << "    return vx_ai_ucmp(lhs.b, rhs.b, sizeof(lhs.b));\n";
+                }
             } else {
                 fn << "    if (lhs < rhs) return -1;\n";
                 fn << "    if (lhs > rhs) return 1;\n";

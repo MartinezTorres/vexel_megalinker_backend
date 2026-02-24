@@ -71,19 +71,7 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
         CTValue folded;
         if (lookup_constexpr_value(expr, folded)) {
             auto scalar_literal = [&](const CTValue& value) -> std::optional<std::string> {
-                if (std::holds_alternative<int64_t>(value)) {
-                    return std::to_string(std::get<int64_t>(value));
-                }
-                if (std::holds_alternative<uint64_t>(value)) {
-                    return std::to_string(std::get<uint64_t>(value));
-                }
-                if (std::holds_alternative<bool>(value)) {
-                    return std::get<bool>(value) ? "1" : "0";
-                }
-                if (std::holds_alternative<double>(value)) {
-                    return std::to_string(std::get<double>(value));
-                }
-                return std::nullopt;
+                return folded_scalar_expr_literal(value, expr ? expr->type : nullptr, expr ? expr->location : SourceLocation());
             };
 
             if (auto lit = scalar_literal(folded)) {
@@ -101,7 +89,9 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
                     init << storage_prefix() << elem_type << " " << temp << "["
                          << array_value->elements.size() << "] = {";
                     for (size_t i = 0; i < array_value->elements.size(); ++i) {
-                        auto lit = scalar_literal(array_value->elements[i]);
+                        auto lit = folded_scalar_expr_literal(array_value->elements[i],
+                                                              expr->type->element_type,
+                                                              expr->location);
                         if (!lit.has_value()) {
                             init.str("");
                             break;
@@ -122,6 +112,13 @@ std::string CodeGenerator::gen_expr(ExprPtr expr) {
 
     switch (expr->kind) {
         case Expr::Kind::IntLiteral:
+            if (expr->has_exact_int_val && is_extended_integer_type(expr->type)) {
+                return emit_extint_temp_literal(expr->type, expr->exact_int_val, expr->literal_is_unsigned, expr->location);
+            }
+            if (expr->has_exact_int_val) {
+                if (expr->exact_int_val.fits_i64()) return std::to_string(expr->exact_int_val.to_i64());
+                if (expr->exact_int_val.fits_u64()) return std::to_string(expr->exact_int_val.to_u64());
+            }
             return std::to_string((int64_t)expr->uint_val);
         case Expr::Kind::FloatLiteral:
             return std::to_string(expr->float_val);
@@ -236,6 +233,9 @@ std::string CodeGenerator::gen_binary(ExprPtr expr) {
         left = gen_expr(expr->left);
     }
 
+    bool left_extint = is_extended_integer_expr(expr->left);
+    bool right_extint = is_extended_integer_expr(expr->right);
+
     // Preserve runtime short-circuit semantics for logical operators.
     if (expr->op == "&&" || expr->op == "||") {
         std::string tmp = fresh_temp();
@@ -266,6 +266,10 @@ std::string CodeGenerator::gen_binary(ExprPtr expr) {
     {
         VoidCallGuard guard(*this, false);
         right = gen_expr(expr->right);
+    }
+
+    if (left_extint || right_extint) {
+        return gen_extint_binary(expr, left, right);
     }
     if (expr->op == "==" || expr->op == "!=") {
         TypePtr cmp_type = expr->left ? expr->left->type : nullptr;
@@ -314,6 +318,10 @@ std::string CodeGenerator::gen_unary(ExprPtr expr) {
     {
         VoidCallGuard guard(*this, false);
         operand = gen_expr(expr->operand);
+    }
+    if (is_extended_integer_type(expr ? expr->type : nullptr) ||
+        is_extended_integer_expr(expr ? expr->operand : nullptr)) {
+        return gen_extint_unary(expr, operand);
     }
     if (!expr->type || expr->type->kind == Type::Kind::TypeVar) {
         return "(" + expr->op + operand + ")";
@@ -1161,10 +1169,23 @@ std::string CodeGenerator::gen_conditional(ExprPtr expr) {
         true_expr = gen_expr(expr->true_expr);
         false_expr = gen_expr(expr->false_expr);
     }
+    if (is_extended_integer_type(expr ? expr->type : nullptr)) {
+        return gen_extint_conditional(expr, cond, true_expr, false_expr);
+    }
     return "(" + cond + " ? " + true_expr + " : " + false_expr + ")";
 }
 
 std::string CodeGenerator::gen_cast(ExprPtr expr) {
+    if ((expr && expr->target_type && is_extended_integer_type(expr->target_type)) ||
+        (expr && expr->operand && expr->operand->type && is_extended_integer_type(expr->operand->type))) {
+        std::string operand;
+        {
+            VoidCallGuard guard(*this, false);
+            operand = gen_expr(expr->operand);
+        }
+        return gen_extint_cast(expr, operand);
+    }
+
     // Primitive to byte array conversion (big-endian order)
     if (expr->target_type && expr->target_type->kind == Type::Kind::Array &&
         expr->target_type->element_type &&
@@ -1417,6 +1438,14 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         VoidCallGuard guard(*this, false);
         rhs = gen_expr(expr->right);
     }
+    if (is_extended_integer_type(lhs_type)) {
+        std::string result = gen_extint_assignment(expr, lhs_type, lhs, rhs, assign_op);
+        if (rhs.rfind("tmp", 0) == 0 &&
+            (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
+            release_temp(rhs);
+        }
+        return result;
+    }
     // Release RHS temp if it's a temporary
     if (rhs.rfind("tmp", 0) == 0 &&
         (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
@@ -1446,16 +1475,8 @@ std::optional<std::pair<int64_t, int64_t>> CodeGenerator::evaluate_range(ExprPtr
     CTValue start_val, end_val;
     if (lookup_constexpr_value(range_expr->left, start_val) &&
         lookup_constexpr_value(range_expr->right, end_val)) {
-        auto to_i64 = [](const CTValue& v, int64_t& out) -> bool {
-            if (std::holds_alternative<int64_t>(v)) {
-                out = std::get<int64_t>(v);
-                return true;
-            }
-            if (std::holds_alternative<uint64_t>(v)) {
-                out = static_cast<int64_t>(std::get<uint64_t>(v));
-                return true;
-            }
-            return false;
+    auto to_i64 = [](const CTValue& v, int64_t& out) -> bool {
+            return ctvalue_to_i64_exact(v, out);
         };
         int64_t start = 0;
         int64_t end = 0;
@@ -1496,17 +1517,32 @@ std::string CodeGenerator::gen_range(ExprPtr expr) {
     std::ostringstream init;
     init << storage_prefix() << elem_type << " " << temp << "[" << size << "] = {";
     bool first = true;
+    bool elem_extint = is_extended_integer_type(expr->type->element_type);
     if (start < end) {
         for (int64_t i = start; i < end; ++i) {
             if (!first) init << ", ";
             first = false;
-            init << i;
+            if (elem_extint) {
+                init << emit_extint_const_initializer(expr->type->element_type,
+                                                      APInt(i),
+                                                      i >= 0,
+                                                      expr->location);
+            } else {
+                init << i;
+            }
         }
     } else {
         for (int64_t i = start; i > end; --i) {
             if (!first) init << ", ";
             first = false;
-            init << i;
+            if (elem_extint) {
+                init << emit_extint_const_initializer(expr->type->element_type,
+                                                      APInt(i),
+                                                      i >= 0,
+                                                      expr->location);
+            } else {
+                init << i;
+            }
         }
     }
     init << "};";
@@ -1548,6 +1584,22 @@ std::string CodeGenerator::gen_length(ExprPtr expr) {
     if (expr->operand->type && expr->operand->type->kind == Type::Kind::Primitive) {
         if (is_float(expr->operand->type->primitive)) {
             return "fabs(" + operand + ")";
+        } else if (is_extended_integer_type(expr->operand->type)) {
+            bool is_signed = false;
+            uint64_t bits = 0;
+            analyze_extint_type(expr->operand->type, is_signed, bits);
+            if (!is_signed) return operand;
+            std::string temp = fresh_temp();
+            std::string t = gen_type(expr->operand->type);
+            if (!declared_temps.count(temp)) {
+                emit(storage_prefix() + t + " " + temp + ";");
+                declared_temps.insert(temp);
+            }
+            emit(temp + " = " + operand + ";");
+            emit("if (vx_ai_signbit(" + temp + ".b, sizeof(" + temp + ".b), " + std::to_string(extint_sign_mask(bits)) + ")) {");
+            emit("  vx_ai_neg(" + temp + ".b, " + temp + ".b, sizeof(" + temp + ".b), " + std::to_string(extint_top_mask(bits)) + ");");
+            emit("}");
+            return temp;
         } else if (is_signed_int(expr->operand->type->primitive)) {
             return "abs(" + operand + ")";
         } else {
@@ -1572,12 +1624,8 @@ std::string CodeGenerator::gen_iteration(ExprPtr expr) {
     std::string size_str;
     int64_t element_count = 0;
     auto value_to_int64 = [&](const CTValue& v, const SourceLocation& loc) -> int64_t {
-        if (std::holds_alternative<int64_t>(v)) {
-            return std::get<int64_t>(v);
-        }
-        if (std::holds_alternative<uint64_t>(v)) {
-            return static_cast<int64_t>(std::get<uint64_t>(v));
-        }
+        int64_t out = 0;
+        if (ctvalue_to_i64_exact(v, out)) return out;
         throw CompileError("Iteration bounds must be integer constants", loc);
     };
 

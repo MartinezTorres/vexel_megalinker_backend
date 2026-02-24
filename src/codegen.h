@@ -5,6 +5,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <unordered_map>
+#include <set>
 #include <vector>
 #include <stack>
 #include <optional>
@@ -96,6 +97,10 @@ class CodeGenerator {
     std::stack<std::ostringstream*> output_stack;
     std::unordered_map<std::string, std::string> comparator_cache;
     std::vector<std::string> comparator_definitions;
+    std::set<std::pair<bool, uint64_t>> extint_types_used;
+    bool extint_runtime_needed = false;
+    std::string extint_runtime_source;
+    std::string extint_header_defs;
     bool in_function = false;
     AnalysisFacts facts;
     const OptimizationFacts* optimization = nullptr;
@@ -205,6 +210,40 @@ private:
     PtrKind ptr_kind_for_symbol(const Symbol* sym) const;
     std::string c_type_for_expr(ExprPtr expr);
     bool expr_has_side_effects(ExprPtr expr) const;
+    bool analyze_extint_type(TypePtr type, bool& is_signed, uint64_t& bits) const;
+    bool is_extended_integer_type(TypePtr type) const;
+    bool is_native_integer_type(TypePtr type) const;
+    bool is_extended_integer_expr(ExprPtr expr) const;
+    std::string extint_type_name(bool is_signed, uint64_t bits) const;
+    void ensure_extint_type(TypePtr type, const SourceLocation& loc, const std::string& context);
+    void ensure_extint_type(bool is_signed, uint64_t bits);
+    void ensure_extint_runtime();
+    uint8_t extint_top_mask(uint64_t bits) const;
+    uint8_t extint_sign_mask(uint64_t bits) const;
+    size_t extint_num_bytes(uint64_t bits, const SourceLocation& loc, const std::string& context) const;
+    std::string emit_extint_temp_literal(TypePtr target_type,
+                                         const APInt& value,
+                                         bool value_is_unsigned,
+                                         const SourceLocation& loc);
+    std::string emit_extint_const_initializer(TypePtr target_type,
+                                              const APInt& value,
+                                              bool value_is_unsigned,
+                                              const SourceLocation& loc);
+    bool ctvalue_to_apint_value(const CTValue& v, APInt& out, bool& is_unsigned) const;
+    std::string gen_extint_binary(ExprPtr expr, const std::string& left, const std::string& right);
+    std::string gen_extint_unary(ExprPtr expr, const std::string& operand);
+    std::string gen_extint_cast(ExprPtr expr, const std::string& operand);
+    std::string gen_extint_assignment(ExprPtr expr,
+                                      TypePtr lhs_type,
+                                      const std::string& lhs,
+                                      const std::string& rhs,
+                                      const std::string& assign_op);
+    std::string gen_extint_conditional(ExprPtr expr,
+                                       const std::string& cond,
+                                       const std::string& true_expr,
+                                       const std::string& false_expr);
+    std::optional<std::string> folded_scalar_expr_literal(const CTValue& value, TypePtr expected_type, const SourceLocation& loc);
+    std::string extint_shift_amount_expr(const std::string& rhs_expr, TypePtr rhs_type, const SourceLocation& loc);
     std::string require_type(TypePtr type, const SourceLocation& loc, const std::string& context);
     std::string gen_type(TypePtr type);
     std::string gen_object_decl(TypePtr type,
