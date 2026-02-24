@@ -30,6 +30,31 @@ bool is_integer_primitive_kind(const TypePtr& type, bool& is_signed, uint64_t& b
     return false;
 }
 
+void replace_all(std::string& text, const std::string& from, const std::string& to) {
+    if (from.empty() || from == to) return;
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+std::string render_extint_alias_macros(const std::string& helper_prefix) {
+    if (helper_prefix == "vx_ai_") return "";
+    static const char* kNames[] = {
+        "zero","copy","mask_top","is_zero","signbit","ucmp","scmp","get_bit","set_bit",
+        "shl1_inplace","add","sub","neg","not","and","or","xor","shl","shr_u","shr_s",
+        "mul","udivmod","cast","to_u64_trunc","to_i64_trunc","from_u64","from_i64",
+        "to_double_u","from_double_u"
+    };
+    std::ostringstream os;
+    for (const char* name : kNames) {
+        os << "#define vx_ai_" << name << " " << helper_prefix << name << "\n";
+    }
+    os << "\n";
+    return os.str();
+}
+
 std::string render_extint_runtime_source() {
     return R"VEXEL_EXTINT(
 static void vx_ai_zero(uint8_t* out, size_t n) {
@@ -397,7 +422,8 @@ bool CodeGenerator::is_extended_integer_expr(ExprPtr expr) const {
 }
 
 std::string CodeGenerator::extint_type_name(bool is_signed, uint64_t bits) const {
-    return std::string(is_signed ? "vx_i" : "vx_u") + std::to_string(bits) + "_t";
+    const std::string prefix = internal_symbol_prefix.empty() ? "vx_" : internal_symbol_prefix;
+    return prefix + (is_signed ? "i" : "u") + std::to_string(bits) + "_t";
 }
 
 uint8_t CodeGenerator::extint_top_mask(uint64_t bits) const {
@@ -424,7 +450,14 @@ size_t CodeGenerator::extint_num_bytes(uint64_t bits, const SourceLocation& loc,
 
 void CodeGenerator::ensure_extint_runtime() {
     if (!extint_runtime_source.empty()) return;
-    extint_runtime_source = render_extint_runtime_source();
+    const std::string symbol_prefix = internal_symbol_prefix.empty() ? "vx_" : internal_symbol_prefix;
+    const std::string helper_prefix = symbol_prefix + "ai_";
+    extint_runtime_source = render_extint_alias_macros(helper_prefix) + render_extint_runtime_source();
+    if (helper_prefix != "vx_ai_") {
+        replace_all(extint_runtime_source, "vx_ai_", helper_prefix);
+        // Restore alias macro left-hand sides after global replacement.
+        replace_all(extint_runtime_source, "#define " + helper_prefix, "#define vx_ai_");
+    }
 }
 
 void CodeGenerator::ensure_extint_type(TypePtr type, const SourceLocation& loc, const std::string& context) {

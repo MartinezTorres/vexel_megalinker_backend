@@ -437,6 +437,20 @@ if ! rg -q "vx_ai_shl|vx_ai_udivmod|vx_ai_add" bad__runtime.c megalinker/*.c; th
   echo "missing arbitrary-width helper usage in megalinker output"
   exit 1
 fi
+if ! "$ROOT/build/vexel" -b megalinker --backend-opt internal_prefix=mltest_ -o bad "$SCRIPT_DIR/bad_width.vx" \
+  >/tmp/megalinker_bad_width_pref.out 2>/tmp/megalinker_bad_width_pref.err; then
+  cat /tmp/megalinker_bad_width_pref.out /tmp/megalinker_bad_width_pref.err
+  echo "prefixed arbitrary-width lowering should compile"
+  exit 1
+fi
+if ! rg --no-ignore -q "typedef struct \\{ unsigned char b\\[2\\]; \\} mltest_u13_t;" megalinker/*.c; then
+  echo "internal prefix must apply to arbitrary-width helper typedef names"
+  exit 1
+fi
+if ! rg --no-ignore -q "static void mltest_ai_shl\\(" bad__runtime.c megalinker/*.c; then
+  echo "internal prefix must apply to arbitrary-width helper function names"
+  exit 1
+fi
 
 echo "ok"
 
