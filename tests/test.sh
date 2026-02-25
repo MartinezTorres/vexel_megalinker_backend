@@ -23,8 +23,11 @@ cleanup() {
     "$SCRIPT_DIR/sdcc.c" "$SCRIPT_DIR/sdcc.h" "$SCRIPT_DIR/sdcc__runtime.c" \
     "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
     "$SCRIPT_DIR/linkage.c" "$SCRIPT_DIR/linkage.h" "$SCRIPT_DIR/linkage__runtime.c" \
-    "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx"
+    "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx" \
+    "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
+    "$SCRIPT_DIR/local_std_math_override.vx"
   rm -rf "$SCRIPT_DIR/megalinker"
+  rm -rf "$SCRIPT_DIR/std"
 }
 trap cleanup EXIT
 
@@ -411,6 +414,35 @@ if ! rg -q "^#define vx_CTRL .*0x4001" megalinker/ram_globals.c; then
 fi
 if ! rg -q "volatile uint8_t\\* const vx_data__ptr = \\(volatile uint8_t\\*\\)\\(uintptr_t\\)\\(0x4002\\);" megalinker/vx_main__reent__from_entry__pA.c; then
   echo "missing local backend-bound pointer lowering"
+  exit 1
+fi
+
+mkdir -p "$SCRIPT_DIR/std"
+cat > "$SCRIPT_DIR/std/math.vx" <<'EOF'
+&!sqrt(x:#f64) -> #f64;
+EOF
+
+cat > "$SCRIPT_DIR/local_std_math_override.vx" <<'EOF'
+::std::math;
+&!seed() -> #f64;
+&^main() -> #i32 {
+  x:#f64 = std::math::sqrt(seed());
+  (#i32)x
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o mathovr "$SCRIPT_DIR/local_std_math_override.vx" \
+  >/tmp/megalinker_math_override.out 2>/tmp/megalinker_math_override.err; then
+  cat /tmp/megalinker_math_override.out /tmp/megalinker_math_override.err
+  echo "local std::math override case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_sqrt\\(" mathovr.h mathovr__runtime.c megalinker/*.c; then
+  echo "local std::math override should use mangled vx_sqrt symbol"
+  exit 1
+fi
+if rg -q "double sqrt\\(" mathovr.h; then
+  echo "local std::math override must not map to libc sqrt in header"
   exit 1
 fi
 

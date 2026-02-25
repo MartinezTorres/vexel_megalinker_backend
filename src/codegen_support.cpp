@@ -242,6 +242,22 @@ std::string CodeGenerator::external_link_name(const std::string& qualified_name,
     return local;
 }
 
+bool CodeGenerator::is_bundled_std_math_function(const Symbol* sym, StmtPtr decl) const {
+    if (!sym || !decl || !analyzed_program || !analyzed_program->program) {
+        return false;
+    }
+    if (sym->module_id < 0) {
+        return false;
+    }
+    const ModuleInfo* mod = analyzed_program->program->module(sym->module_id);
+    if (!mod || mod->origin != ModuleOrigin::BundledStd) {
+        return false;
+    }
+    const std::string& path = mod->path;
+    return path == "std/math.vx" ||
+           (path.size() >= 11 && path.compare(path.size() - 11, 11, "std/math.vx") == 0);
+}
+
 std::string CodeGenerator::load_module_fn(char page) const {
     if (page == 'A') {
         if (!abi.load_module_a_fn.empty()) return abi.load_module_a_fn;

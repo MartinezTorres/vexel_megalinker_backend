@@ -679,14 +679,8 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
                 func_name = mangle_name(variant);
             } else {
                 std::string alias_lookup_name = base_name;
-                if (callee_decl) {
-                    const std::string& file = callee_decl->location.filename;
-                    bool from_std_math =
-                        file == "std/math.vx" ||
-                        (file.size() >= 11 && file.compare(file.size() - 11, 11, "std/math.vx") == 0);
-                    if (from_std_math) {
-                        alias_lookup_name = "std::math::" + callee_decl->func_name;
-                    }
+                if (sym && callee_decl && is_bundled_std_math_function(sym, callee_decl)) {
+                    alias_lookup_name = "std::math::" + callee_decl->func_name;
                 }
                 func_name = external_link_name(alias_lookup_name, mangle_name(base_name));
             }
