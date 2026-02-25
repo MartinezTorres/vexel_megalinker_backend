@@ -268,6 +268,7 @@ private:
     std::string load_module_fn(char page) const;
     std::string strlen_far_fn(char page) const;
     std::string external_link_name(const std::string& qualified_name, const std::string& fallback_c_name) const;
+    bool is_std_math_macro_builtin_name(const std::string& runtime_name) const;
     bool is_bundled_std_math_function(const Symbol* sym, StmtPtr decl) const;
     std::string ensure_comparator(TypePtr type);
     int64_t resolve_array_length(TypePtr type, const SourceLocation& loc);

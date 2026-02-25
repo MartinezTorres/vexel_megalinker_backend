@@ -24,6 +24,8 @@ cleanup() {
     "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
     "$SCRIPT_DIR/linkage.c" "$SCRIPT_DIR/linkage.h" "$SCRIPT_DIR/linkage__runtime.c" \
     "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx" \
+    "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
+    "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
     "$SCRIPT_DIR/local_std_math_override.vx"
   rm -rf "$SCRIPT_DIR/megalinker"
@@ -414,6 +416,39 @@ if ! rg -q "^#define vx_CTRL .*0x4001" megalinker/ram_globals.c; then
 fi
 if ! rg -q "volatile uint8_t\\* const vx_data__ptr = \\(volatile uint8_t\\*\\)\\(uintptr_t\\)\\(0x4002\\);" megalinker/vx_main__reent__from_entry__pA.c; then
   echo "missing local backend-bound pointer lowering"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/bundled_std_math_classify.vx" <<'EOF'
+::std::math;
+&!seed() -> #f64;
+&^main() -> #i32 {
+  a:#b = std::math::isfinite(seed());
+  b:#b = std::math::isnan(std::math::sqrt(seed()));
+  (#i32)a + (#i32)b
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o mathclass "$SCRIPT_DIR/bundled_std_math_classify.vx" \
+  >/tmp/megalinker_math_class.out 2>/tmp/megalinker_math_class.err; then
+  cat /tmp/megalinker_math_class.out /tmp/megalinker_math_class.err
+  echo "bundled std::math classification case failed to compile"
+  exit 1
+fi
+if ! rg -q "isfinite\\(" mathclass__runtime.c megalinker/*.c; then
+  echo "bundled std::math classification should map to libc isfinite"
+  exit 1
+fi
+if ! rg -q "isnan\\(" mathclass__runtime.c megalinker/*.c; then
+  echo "bundled std::math classification should map to libc isnan"
+  exit 1
+fi
+if rg -q "vx_isfinite\\(" mathclass.h mathclass__runtime.c megalinker/*.c; then
+  echo "bundled std::math classification should not use mangled vx_isfinite symbol"
+  exit 1
+fi
+if rg -q "vx_isnan\\(" mathclass.h mathclass__runtime.c megalinker/*.c; then
+  echo "bundled std::math classification should not use mangled vx_isnan symbol"
   exit 1
 fi
 

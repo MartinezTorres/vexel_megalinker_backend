@@ -34,16 +34,31 @@ std::string sanitize_identifier(const std::string& input) {
     return result;
 }
 
-bool is_std_math_libc_name(const std::string& name) {
+bool is_std_math_direct_libc_name(const std::string& name) {
     static const std::unordered_set<std::string> kNames = {
         "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log", "log2", "log10",
         "floor", "ceil", "trunc", "round", "fabs", "sqrt",
         "pow", "atan2", "fmod",
         "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "expf", "logf", "log2f", "log10f",
         "floorf", "ceilf", "truncf", "roundf", "fabsf", "sqrtf",
-        "powf", "atan2f", "fmodf"
+        "powf", "atan2f", "fmodf",
+        "isnan", "isinf", "isfinite"
     };
     return kNames.count(name) > 0;
+}
+
+std::string std_math_libc_alias(const std::string& name) {
+    if (is_std_math_direct_libc_name(name)) {
+        return name;
+    }
+    if (name == "isnanf") return "isnan";
+    if (name == "isinff") return "isinf";
+    if (name == "isfinitef") return "isfinite";
+    return "";
+}
+
+bool is_std_math_macro_builtin_name_impl(const std::string& runtime_name) {
+    return runtime_name == "isnan" || runtime_name == "isinf" || runtime_name == "isfinite";
 }
 
 } // namespace
@@ -236,10 +251,15 @@ std::string CodeGenerator::external_link_name(const std::string& qualified_name,
         return fallback_c_name;
     }
     std::string local = qualified_name.substr(prefix.size());
-    if (!is_std_math_libc_name(local)) {
+    std::string alias = std_math_libc_alias(local);
+    if (alias.empty()) {
         return fallback_c_name;
     }
-    return local;
+    return alias;
+}
+
+bool CodeGenerator::is_std_math_macro_builtin_name(const std::string& runtime_name) const {
+    return is_std_math_macro_builtin_name_impl(runtime_name);
 }
 
 bool CodeGenerator::is_bundled_std_math_function(const Symbol* sym, StmtPtr decl) const {
