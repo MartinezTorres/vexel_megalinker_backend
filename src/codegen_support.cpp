@@ -34,6 +34,18 @@ std::string sanitize_identifier(const std::string& input) {
     return result;
 }
 
+bool is_std_math_libc_name(const std::string& name) {
+    static const std::unordered_set<std::string> kNames = {
+        "sin", "cos", "tan", "asin", "acos", "atan", "exp", "log", "log2", "log10",
+        "floor", "ceil", "trunc", "round", "fabs", "sqrt",
+        "pow", "atan2", "fmod",
+        "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "expf", "logf", "log2f", "log10f",
+        "floorf", "ceilf", "truncf", "roundf", "fabsf", "sqrtf",
+        "powf", "atan2f", "fmodf"
+    };
+    return kNames.count(name) > 0;
+}
+
 } // namespace
 
 namespace vexel::megalinker_codegen {
@@ -215,6 +227,19 @@ std::string CodeGenerator::nonreentrant_arg_slot_name(const std::string& c_name,
 
 std::string CodeGenerator::nonreentrant_ret_slot_name(const std::string& c_name) const {
     return "__vx_nr_ret_" + c_name;
+}
+
+std::string CodeGenerator::external_link_name(const std::string& qualified_name,
+                                              const std::string& fallback_c_name) const {
+    const std::string prefix = "std::math::";
+    if (qualified_name.rfind(prefix, 0) != 0) {
+        return fallback_c_name;
+    }
+    std::string local = qualified_name.substr(prefix.size());
+    if (!is_std_math_libc_name(local)) {
+        return fallback_c_name;
+    }
+    return local;
 }
 
 std::string CodeGenerator::load_module_fn(char page) const {

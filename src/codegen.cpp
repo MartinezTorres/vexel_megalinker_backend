@@ -570,6 +570,17 @@ void CodeGenerator::gen_module(const Module& mod) {
                 if (!stmt->type_namespace.empty()) {
                     func_name = stmt->type_namespace + "::" + stmt->func_name;
                 }
+                auto from_std_math_module = [&](StmtPtr f) {
+                    if (!f) return false;
+                    const std::string& file = f->location.filename;
+                    return file == "std/math.vx" ||
+                           (file.size() >= 11 && file.compare(file.size() - 11, 11, "std/math.vx") == 0);
+                };
+                Symbol* ext_sym = binding_for(stmt);
+                std::string qualified_name = (ext_sym && !ext_sym->name.empty()) ? ext_sym->name : func_name;
+                if (from_std_math_module(stmt)) {
+                    qualified_name = "std::math::" + stmt->func_name;
+                }
                 bool is_nonreentrant = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
                                                    [](const Annotation& a) { return a.name == "nonreentrant"; });
                 char reent_key = is_nonreentrant ? 'N' : 'R';
@@ -584,7 +595,8 @@ void CodeGenerator::gen_module(const Module& mod) {
                                                           false,
                                                           false));
                 std::string ret_type = stmt->return_type ? gen_type(stmt->return_type) : "void";
-                emit_header(ret_type + " " + mangle_name(func_name) + "(");
+                std::string c_name = external_link_name(qualified_name, mangle_name(func_name));
+                emit_header(ret_type + " " + c_name + "(");
                 for (size_t i = 0; i < stmt->params.size(); i++) {
                     if (i > 0) emit_header(", ");
                     std::string ptype = require_type(stmt->params[i].type,
