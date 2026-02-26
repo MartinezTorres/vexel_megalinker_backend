@@ -173,6 +173,7 @@ private:
     std::string gen_member(ExprPtr expr);
     std::string gen_array_initializer(ExprPtr expr);
     std::string gen_array_literal(ExprPtr expr);
+    void emit_array_literal_assignments(const std::string& target, ExprPtr expr, TypePtr array_type);
     std::string gen_tuple_literal(ExprPtr expr);
     std::string gen_block(ExprPtr expr);
     std::string gen_block_optimized(ExprPtr expr);

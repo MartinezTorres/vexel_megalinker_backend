@@ -1008,6 +1008,33 @@ std::string CodeGenerator::gen_array_initializer(ExprPtr expr) {
     return init;
 }
 
+void CodeGenerator::emit_array_literal_assignments(const std::string& target, ExprPtr expr, TypePtr array_type) {
+    if (!expr || expr->kind != Expr::Kind::ArrayLiteral) {
+        throw CompileError("Expected array literal for element-wise initialization",
+                           expr ? expr->location : SourceLocation());
+    }
+    if (!array_type || array_type->kind != Type::Kind::Array) {
+        throw CompileError("Missing array type for element-wise initialization",
+                           expr ? expr->location : SourceLocation());
+    }
+
+    TypePtr elem_type = array_type->element_type;
+    for (size_t i = 0; i < expr->elements.size(); ++i) {
+        ExprPtr elem = expr->elements[i];
+        std::string slot = target + "[" + std::to_string(i) + "]";
+        if (elem && elem->kind == Expr::Kind::ArrayLiteral) {
+            emit_array_literal_assignments(slot, elem, elem_type);
+            continue;
+        }
+        std::string value;
+        {
+            VoidCallGuard guard(*this, false);
+            value = gen_expr(elem);
+        }
+        emit(slot + " = " + value + ";");
+    }
+}
+
 std::string CodeGenerator::gen_array_literal(ExprPtr expr) {
     std::string temp = fresh_temp();
 
@@ -1015,13 +1042,19 @@ std::string CodeGenerator::gen_array_literal(ExprPtr expr) {
     if (!expr->type || expr->type->kind != Type::Kind::Array || !expr->type->element_type) {
         throw CompileError("Missing array element type for array literal", expr->location);
     }
-    // Generate array declaration and initialization
-    // Use static to ensure it persists beyond the current scope (important for struct fields)
+    // Reentrant functions can use block-scope aggregate initialization directly.
+    // Non-reentrant functions use static-frame locals, so initialize element-wise at runtime
+    // to avoid invalid non-constant static initializers and preserve fresh-value semantics.
     std::string array_decl = gen_object_decl(expr->type,
                                              temp,
                                              expr->location,
                                              "array literal temporary");
-    emit("static " + array_decl + " = " + gen_array_initializer(expr) + ";");
+    if (storage_prefix().empty()) {
+        emit(array_decl + " = " + gen_array_initializer(expr) + ";");
+    } else {
+        emit(storage_prefix() + array_decl + ";");
+        emit_array_literal_assignments(temp, expr, expr->type);
+    }
 
     if (ptr_kind_for_expr(expr) == PtrKind::Far) {
         std::string mod = current_module_id_expr.empty() ? "0" : current_module_id_expr;
