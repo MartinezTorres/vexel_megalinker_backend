@@ -48,6 +48,139 @@ std::string escape_c_string(const std::string& input) {
     return oss.str();
 }
 
+bool is_fixed_primitive_type_codegen(const vexel::TypePtr& type) {
+    return type &&
+           type->kind == vexel::Type::Kind::Primitive &&
+           (vexel::is_signed_fixed(type->primitive) || vexel::is_unsigned_fixed(type->primitive));
+}
+
+bool fixed_native_meta_codegen(const vexel::TypePtr& type,
+                               uint64_t& total_bits,
+                               bool& is_signed_raw,
+                               int64_t& fractional_bits) {
+    if (!is_fixed_primitive_type_codegen(type)) return false;
+    int64_t bits_i64 = vexel::type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+    if (!(bits_i64 == 8 || bits_i64 == 16 || bits_i64 == 32 || bits_i64 == 64)) return false;
+    total_bits = static_cast<uint64_t>(bits_i64);
+    is_signed_raw = (type->primitive == vexel::PrimitiveType::FixedInt);
+    fractional_bits = type->fractional_bits;
+    return true;
+}
+
+bool fixed_muldiv_meta_supported_codegen(const vexel::TypePtr& type,
+                                         uint64_t& total_bits,
+                                         bool& is_signed_raw,
+                                         int64_t& fractional_bits) {
+    if (!fixed_native_meta_codegen(type, total_bits, is_signed_raw, fractional_bits)) return false;
+    return total_bits == 8 || total_bits == 16 || total_bits == 32;
+}
+
+std::string pow2_u64_literal_codegen(uint64_t shift) {
+    return std::to_string(1ULL << shift) + "ULL";
+}
+
+std::string pow2_i64_literal_codegen(uint64_t shift) {
+    return std::to_string(1LL << shift) + "LL";
+}
+
+std::string div_pow2_u64_expr_codegen(const std::string& value_u64, uint64_t shift) {
+    if (shift >= 64) return "((uint64_t)0)";
+    return "((uint64_t)(" + value_u64 + ") >> " + std::to_string(shift) + ")";
+}
+
+std::string div_pow2_s64_expr_codegen(const std::string& value_i64, uint64_t shift) {
+    if (shift >= 64) return "((int64_t)0)";
+    if (shift == 0) return "((int64_t)(" + value_i64 + "))";
+    std::string v = "((int64_t)(" + value_i64 + "))";
+    std::string mag = "((uint64_t)(-(" + v + " + 1)) + 1ULL)";
+    std::string q = "((" + mag + ") >> " + std::to_string(shift) + ")";
+    return "((" + v + " < 0) ? -(int64_t)(" + q + ") : (int64_t)(((uint64_t)" + v + ") >> " +
+           std::to_string(shift) + "))";
+}
+
+std::string mul_pow2_u64_expr_codegen(const std::string& value_u64, uint64_t shift) {
+    if (shift >= 64) return "((uint64_t)0)";
+    return "((uint64_t)((uint64_t)(" + value_u64 + ") * " + pow2_u64_literal_codegen(shift) + "))";
+}
+
+std::string fixed_muldiv_raw_expr_codegen(const vexel::TypePtr& fixed_type,
+                                          const std::string& raw_c_type,
+                                          const std::string& lhs,
+                                          const std::string& rhs,
+                                          const std::string& op,
+                                          const vexel::SourceLocation& loc) {
+    uint64_t bits = 0;
+    bool signed_raw = false;
+    int64_t frac = 0;
+    if (!fixed_muldiv_meta_supported_codegen(fixed_type, bits, signed_raw, frac)) {
+        throw vexel::CompileError(
+            "Fixed-point operator '" + op +
+                "' currently supports only native storage widths up to 32 bits (8/16/32)",
+            loc);
+    }
+
+    if (signed_raw) {
+        std::string l = "((int64_t)((" + raw_c_type + ")" + lhs + "))";
+        std::string r = "((int64_t)((" + raw_c_type + ")" + rhs + "))";
+        if (op == "*") {
+            std::string prod = "((" + l + ") * (" + r + "))";
+            if (frac >= 0) {
+                return "((" + raw_c_type + ")(" +
+                       div_pow2_s64_expr_codegen(prod, static_cast<uint64_t>(frac)) + "))";
+            }
+            uint64_t k = static_cast<uint64_t>(-frac);
+            if (k >= bits) return "((" + raw_c_type + ")0)";
+            return "((" + raw_c_type + ")(" +
+                   mul_pow2_u64_expr_codegen("(uint64_t)(" + prod + ")", k) + "))";
+        }
+        if (op == "/") {
+            if (frac >= 0) {
+                std::string num = "((" + l + ") * " + pow2_i64_literal_codegen(static_cast<uint64_t>(frac)) + ")";
+                return "((" + raw_c_type + ")((" + num + ") / (" + r + ")))";
+            }
+            uint64_t k = static_cast<uint64_t>(-frac);
+            if (k >= bits) return "((" + raw_c_type + ")0)";
+            std::string den = "((" + r + ") * " + pow2_i64_literal_codegen(k) + ")";
+            return "((" + raw_c_type + ")((" + l + ") / (" + den + ")))";
+        }
+        if (op == "%") {
+            std::string q = "((" + raw_c_type + ")((" + l + ") / (" + r + ")))";
+            std::string prod_back = "((" + raw_c_type + ")((" + q + ") * ((" + raw_c_type + ")" + rhs + ")))";
+            return "((" + raw_c_type + ")((" + raw_c_type + ")" + lhs + " - " + prod_back + "))";
+        }
+    } else {
+        std::string l = "((uint64_t)((" + raw_c_type + ")" + lhs + "))";
+        std::string r = "((uint64_t)((" + raw_c_type + ")" + rhs + "))";
+        if (op == "*") {
+            std::string prod = "((uint64_t)((" + l + ") * (" + r + ")))";
+            if (frac >= 0) {
+                return "((" + raw_c_type + ")(" +
+                       div_pow2_u64_expr_codegen(prod, static_cast<uint64_t>(frac)) + "))";
+            }
+            uint64_t k = static_cast<uint64_t>(-frac);
+            if (k >= bits) return "((" + raw_c_type + ")0)";
+            return "((" + raw_c_type + ")(" + mul_pow2_u64_expr_codegen(prod, k) + "))";
+        }
+        if (op == "/") {
+            if (frac >= 0) {
+                std::string num = "((uint64_t)((" + l + ") * " + pow2_u64_literal_codegen(static_cast<uint64_t>(frac)) + "))";
+                return "((" + raw_c_type + ")((" + num + ") / (" + r + ")))";
+            }
+            uint64_t k = static_cast<uint64_t>(-frac);
+            if (k >= bits) return "((" + raw_c_type + ")0)";
+            std::string den = "((uint64_t)((" + r + ") * " + pow2_u64_literal_codegen(k) + "))";
+            return "((" + raw_c_type + ")((" + l + ") / (" + den + ")))";
+        }
+        if (op == "%") {
+            std::string q = "((" + raw_c_type + ")((" + l + ") / (" + r + ")))";
+            std::string prod_back = "((" + raw_c_type + ")((" + q + ") * ((" + raw_c_type + ")" + rhs + ")))";
+            return "((" + raw_c_type + ")((" + raw_c_type + ")" + lhs + " - " + prod_back + "))";
+        }
+    }
+
+    throw vexel::CompileError("Unsupported fixed-point operator in megalinker codegen: " + op, loc);
+}
+
 } // namespace
 
 namespace vexel::megalinker_codegen {
@@ -270,6 +403,19 @@ std::string CodeGenerator::gen_binary(ExprPtr expr) {
 
     if (left_extint || right_extint) {
         return gen_extint_binary(expr, left, right);
+    }
+    if (expr && expr->type && is_fixed_primitive_type_codegen(expr->type) &&
+        (expr->op == "*" || expr->op == "/" || expr->op == "%")) {
+        std::string tmp = fresh_temp();
+        std::string result_type = c_type_for_expr(expr);
+        if (!declared_temps.count(tmp)) {
+            emit(storage_prefix() + result_type + " " + tmp + ";");
+            declared_temps.insert(tmp);
+        }
+        emit(tmp + " = " +
+             fixed_muldiv_raw_expr_codegen(expr->type, gen_type(expr->type), left, right, expr->op, expr->location) +
+             ";");
+        return tmp;
     }
     if (expr->op == "==" || expr->op == "!=") {
         TypePtr cmp_type = expr->left ? expr->left->type : nullptr;
@@ -1663,6 +1809,34 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
             release_temp(rhs);
         }
         return result;
+    }
+    if (lhs_type && is_fixed_primitive_type_codegen(lhs_type) &&
+        (assign_op == "*=" || assign_op == "/=" || assign_op == "%=")) {
+        std::string lhs_type_str = gen_type(lhs_type);
+        std::string ptr_tmp = fresh_temp();
+        if (!declared_temps.count(ptr_tmp)) {
+            emit(storage_prefix() + lhs_type_str + "* " + ptr_tmp + " = &(" + lhs + ");");
+            declared_temps.insert(ptr_tmp);
+        } else {
+            emit(ptr_tmp + " = &(" + lhs + ");");
+        }
+        std::string lhs_deref = std::string("*") + ptr_tmp;
+        emit(lhs_deref + " = " +
+             fixed_muldiv_raw_expr_codegen(lhs_type, lhs_type_str, lhs_deref, rhs,
+                                           assign_op.substr(0, assign_op.size() - 1),
+                                           expr->location) +
+             ";");
+        std::string result_tmp = fresh_temp();
+        if (!declared_temps.count(result_tmp)) {
+            emit(storage_prefix() + lhs_type_str + " " + result_tmp + ";");
+            declared_temps.insert(result_tmp);
+        }
+        emit(result_tmp + " = " + lhs_deref + ";");
+        if (rhs.rfind("tmp", 0) == 0 &&
+            (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
+            release_temp(rhs);
+        }
+        return result_tmp;
     }
     // Release RHS temp if it's a temporary
     if (rhs.rfind("tmp", 0) == 0 &&

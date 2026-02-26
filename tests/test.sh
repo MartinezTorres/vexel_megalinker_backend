@@ -28,6 +28,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedabi.vx" \
     "$SCRIPT_DIR/fixedcast.c" "$SCRIPT_DIR/fixedcast.h" "$SCRIPT_DIR/fixedcast__runtime.c" \
     "$SCRIPT_DIR/fixedcast.vx" \
+    "$SCRIPT_DIR/fixedops.c" "$SCRIPT_DIR/fixedops.h" "$SCRIPT_DIR/fixedops__runtime.c" \
+    "$SCRIPT_DIR/fixedops.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
@@ -236,6 +238,35 @@ if ! "$ROOT/build/vexel" -b megalinker -o fixedcast "$SCRIPT_DIR/fixedcast.vx" \
 fi
 if ! rg -q "vx_up_u\\(uint16_t vx_x\\);" fixedcast.h; then
   echo "missing fixed-point cast wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedops.vx" <<'EOF'
+&^acc_u(a:#u8.8, b:#u8.8, c:#u8.8) -> #u8.8 {
+  x:#u8.8 = a;
+  x *= b;
+  x /= c;
+  x %= b;
+  x
+}
+&^acc_s(a:#i8.8, b:#i8.8, c:#i8.8) -> #i8.8 {
+  x:#i8.8 = a;
+  x *= b;
+  x /= c;
+  x %= b;
+  x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedops "$SCRIPT_DIR/fixedops.vx" \
+  >/tmp/megalinker_fixedops.out 2>/tmp/megalinker_fixedops.err; then
+  cat /tmp/megalinker_fixedops.out /tmp/megalinker_fixedops.err
+  echo "fixed-point mul/div/mod regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_acc_u\\(uint16_t vx_a, uint16_t vx_b, uint16_t vx_c\\);" fixedops.h; then
+  echo "missing fixed-point mul/div/mod wrapper signature in megalinker header"
   exit 1
 fi
 
