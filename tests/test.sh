@@ -32,6 +32,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedops.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
+    "$SCRIPT_DIR/fixedden.c" "$SCRIPT_DIR/fixedden.h" "$SCRIPT_DIR/fixedden__runtime.c" \
+    "$SCRIPT_DIR/fixedden.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
@@ -286,6 +288,22 @@ if ! "$ROOT/build/vexel" -b megalinker -o fixedfloat "$SCRIPT_DIR/fixedfloat.vx"
 fi
 if ! rg -q "vx_to_fixed\\(double vx_x\\);" fixedfloat.h; then
   echo "missing fixed-point float cast wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedden.vx" <<'EOF'
+&^safe_div(a:#u100.-92, b:#u100.-92) -> #u100.-92 { a / b }
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedden "$SCRIPT_DIR/fixedden.vx" \
+  >/tmp/megalinker_fixedden.out 2>/tmp/megalinker_fixedden.err; then
+  cat /tmp/megalinker_fixedden.out /tmp/megalinker_fixedden.err
+  echo "fixed-point large-negative-frac division regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "== 0" fixedden__runtime.c megalinker/*.c || ! rg -q " / " fixedden__runtime.c megalinker/*.c; then
+  echo "missing fixed-point division zero-guard path for large negative fractional width"
   exit 1
 fi
 

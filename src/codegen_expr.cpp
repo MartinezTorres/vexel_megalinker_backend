@@ -139,7 +139,10 @@ std::string fixed_muldiv_raw_expr_codegen(const vexel::TypePtr& fixed_type,
                 return "((" + raw_c_type + ")((" + num + ") / (" + r + ")))";
             }
             uint64_t k = static_cast<uint64_t>(-frac);
-            if (k >= bits) return "((" + raw_c_type + ")0)";
+            if (k >= bits) {
+                return "((" + raw_c_type + ")((((" + raw_c_type + ")" + rhs + ") == 0) ? "
+                       "((" + raw_c_type + ")((" + l + ") / (" + r + "))) : 0))";
+            }
             std::string den = "((" + r + ") * " + pow2_i64_literal_codegen(k) + ")";
             return "((" + raw_c_type + ")((" + l + ") / (" + den + ")))";
         }
@@ -167,7 +170,10 @@ std::string fixed_muldiv_raw_expr_codegen(const vexel::TypePtr& fixed_type,
                 return "((" + raw_c_type + ")((" + num + ") / (" + r + ")))";
             }
             uint64_t k = static_cast<uint64_t>(-frac);
-            if (k >= bits) return "((" + raw_c_type + ")0)";
+            if (k >= bits) {
+                return "((" + raw_c_type + ")((((" + raw_c_type + ")" + rhs + ") == 0) ? "
+                       "((" + raw_c_type + ")((" + l + ") / (" + r + "))) : 0))";
+            }
             std::string den = "((uint64_t)((" + r + ") * " + pow2_u64_literal_codegen(k) + "))";
             return "((" + raw_c_type + ")((" + l + ") / (" + den + ")))";
         }
