@@ -30,6 +30,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedcast.vx" \
     "$SCRIPT_DIR/fixedops.c" "$SCRIPT_DIR/fixedops.h" "$SCRIPT_DIR/fixedops__runtime.c" \
     "$SCRIPT_DIR/fixedops.vx" \
+    "$SCRIPT_DIR/fixedbit.c" "$SCRIPT_DIR/fixedbit.h" "$SCRIPT_DIR/fixedbit__runtime.c" \
+    "$SCRIPT_DIR/fixedbit.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/fixedden.c" "$SCRIPT_DIR/fixedden.h" "$SCRIPT_DIR/fixedden__runtime.c" \
@@ -271,6 +273,30 @@ if ! "$ROOT/build/vexel" -b megalinker -o fixedops "$SCRIPT_DIR/fixedops.vx" \
 fi
 if ! rg -q "vx_acc_u\\(uint16_t vx_a, uint16_t vx_b, uint16_t vx_c\\);" fixedops.h; then
   echo "missing fixed-point mul/div/mod wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedbit.vx" <<'EOF'
+&^bitmix(a:#u8.0, b:#u8.0, s:#u8.0) -> #u8.0 {
+  x:#u8.0 = a;
+  x &= b;
+  x |= a;
+  x ^= b;
+  x <<= s;
+  x >>= s;
+  ~x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedbit "$SCRIPT_DIR/fixedbit.vx" \
+  >/tmp/megalinker_fixedbit.out 2>/tmp/megalinker_fixedbit.err; then
+  cat /tmp/megalinker_fixedbit.out /tmp/megalinker_fixedbit.err
+  echo "fixed-point zero-fraction bitwise/shift regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_bitmix\\(uint8_t vx_a, uint8_t vx_b, uint8_t vx_s\\);" fixedbit.h; then
+  echo "missing fixed-point zero-fraction bitwise/shift wrapper signature in megalinker header"
   exit 1
 fi
 
