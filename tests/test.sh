@@ -32,6 +32,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedops.vx" \
     "$SCRIPT_DIR/fixedbit.c" "$SCRIPT_DIR/fixedbit.h" "$SCRIPT_DIR/fixedbit__runtime.c" \
     "$SCRIPT_DIR/fixedbit.vx" \
+    "$SCRIPT_DIR/fixedbit72.c" "$SCRIPT_DIR/fixedbit72.h" "$SCRIPT_DIR/fixedbit72__runtime.c" \
+    "$SCRIPT_DIR/fixedbit72.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/fixedden.c" "$SCRIPT_DIR/fixedden.h" "$SCRIPT_DIR/fixedden__runtime.c" \
@@ -297,6 +299,38 @@ if ! "$ROOT/build/vexel" -b megalinker -o fixedbit "$SCRIPT_DIR/fixedbit.vx" \
 fi
 if ! rg -q "vx_bitmix\\(uint8_t vx_a, uint8_t vx_b, uint8_t vx_s\\);" fixedbit.h; then
   echo "missing fixed-point zero-fraction bitwise/shift wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedbit72.vx" <<'EOF'
+&^bitmix72(a:#u72.0, b:#u72.0, s:#u72.0) -> #u72.0 {
+  x:#u72.0 = a;
+  x = b;
+  x &= a;
+  x |= b;
+  x ^= a;
+  x <<= s;
+  x >>= s;
+  (~a) & x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedbit72 "$SCRIPT_DIR/fixedbit72.vx" \
+  >/tmp/megalinker_fixedbit72.out 2>/tmp/megalinker_fixedbit72.err; then
+  cat /tmp/megalinker_fixedbit72.out /tmp/megalinker_fixedbit72.err
+  echo "non-native fixed-point zero-fraction bitwise/shift regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "^__nonbanked void vx_bitmix72\\(vx_u72_t\\* __vx_out, vx_u72_t\\* vx_a, vx_u72_t\\* vx_b, vx_u72_t\\* vx_s\\);" fixedbit72.h; then
+  echo "missing non-native fixed-point zero-fraction bitwise/shift wrapper signature in megalinker header"
+  exit 1
+fi
+if ! rg -q "vx_ai_and\\(" fixedbit72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_shl\\(" fixedbit72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_shr_u\\(" fixedbit72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_not\\(" fixedbit72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for non-native fixed-point bitwise/shift"
   exit 1
 fi
 
