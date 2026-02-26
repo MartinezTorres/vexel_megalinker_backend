@@ -1527,11 +1527,6 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
                                expr ? expr->location : SourceLocation());
         }
 
-        if (is_float(source_type->primitive) || is_float(expr->target_type->primitive)) {
-            throw CompileError("Fixed-point casts with floating-point operands are not implemented yet",
-                               expr->location);
-        }
-
         uint64_t src_fixed_bits = 0;
         bool src_fixed_signed = false;
         int64_t src_frac = 0;
@@ -1581,6 +1576,12 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
         };
 
         if (target_is_fixed) {
+            if (is_float(source_type->primitive)) {
+                std::string out_tmp = declare_temp(expr->target_type);
+                emit(out_tmp + " = (" + target + ")trunc(ldexp((double)" + src_tmp + ", " +
+                     std::to_string(dst_frac) + "));");
+                return out_tmp;
+            }
             bool src_signed = false;
             uint64_t src_bits = 0;
             if (source_is_fixed) {
@@ -1607,10 +1608,20 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
             return out_tmp;
         }
 
+        if (is_float(expr->target_type->primitive)) {
+            std::string out_tmp = declare_temp(expr->target_type);
+            std::string raw_as_double = source_is_fixed && src_fixed_signed
+                ? "((double)(int64_t)" + src_tmp + ")"
+                : "((double)(uint64_t)" + src_tmp + ")";
+            emit(out_tmp + " = (" + target + ")ldexp(" + raw_as_double + ", " +
+                 std::to_string(-src_frac) + ");");
+            return out_tmp;
+        }
+
         bool target_is_intlike = is_signed_int(expr->target_type->primitive) ||
                                  is_unsigned_int(expr->target_type->primitive);
         if (!target_is_intlike) {
-            throw CompileError("Fixed-point casts with floating-point operands are not implemented yet",
+            throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
                                expr->location);
         }
 

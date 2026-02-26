@@ -30,6 +30,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedcast.vx" \
     "$SCRIPT_DIR/fixedops.c" "$SCRIPT_DIR/fixedops.h" "$SCRIPT_DIR/fixedops__runtime.c" \
     "$SCRIPT_DIR/fixedops.vx" \
+    "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
+    "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
@@ -267,6 +269,23 @@ if ! "$ROOT/build/vexel" -b megalinker -o fixedops "$SCRIPT_DIR/fixedops.vx" \
 fi
 if ! rg -q "vx_acc_u\\(uint16_t vx_a, uint16_t vx_b, uint16_t vx_c\\);" fixedops.h; then
   echo "missing fixed-point mul/div/mod wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedfloat.vx" <<'EOF'
+&^to_fixed(x:#f64) -> #u8.8 { (#u8.8)x }
+&^to_float(x:#u8.8) -> #f64 { (#f64)x }
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedfloat "$SCRIPT_DIR/fixedfloat.vx" \
+  >/tmp/megalinker_fixedfloat.out 2>/tmp/megalinker_fixedfloat.err; then
+  cat /tmp/megalinker_fixedfloat.out /tmp/megalinker_fixedfloat.err
+  echo "fixed-point float cast regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_to_fixed\\(double vx_x\\);" fixedfloat.h; then
+  echo "missing fixed-point float cast wrapper signature in megalinker header"
   exit 1
 fi
 
