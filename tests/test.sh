@@ -430,6 +430,36 @@ if ! rg -q "vx_to_fixed\\(double vx_x\\);" fixedfloat.h; then
   exit 1
 fi
 
+cat > "$SCRIPT_DIR/fixedcast72.vx" <<'EOF'
+&^cast_up(a:#u72.0) -> #u80.0 { (#u80.0)a }
+&^cast_i(a:#i72.0) -> #i32 { (#i32)a }
+&^cast_f(a:#u72.0) -> #f64 { (#f64)a }
+&^from_f(a:#f64) -> #u72.0 { (#u72.0)a }
+&^tail_byte(a:#u72.0) -> #u8 {
+  bytes:#u8[9] = (#u8[9])a;
+  bytes[8]
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedcast72 "$SCRIPT_DIR/fixedcast72.vx" \
+  >/tmp/megalinker_fixedcast72.out 2>/tmp/megalinker_fixedcast72.err; then
+  cat /tmp/megalinker_fixedcast72.out /tmp/megalinker_fixedcast72.err
+  echo "non-native fixed-point zero-fraction cast regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_cast_up" fixedcast72.h || ! rg -q "vx_tail_byte" fixedcast72.h; then
+  echo "missing non-native fixed-point cast wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_cast\\(" fixedcast72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_to_double_u\\(" fixedcast72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_from_double_u\\(" fixedcast72__runtime.c megalinker/*.c || \
+   ! rg -q "\\.b\\[" fixedcast72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for non-native fixed-point casts"
+  exit 1
+fi
+
 cat > "$SCRIPT_DIR/fixedden.vx" <<'EOF'
 &^safe_div(a:#u100.-92, b:#u100.-92) -> #u100.-92 { a / b }
 &^main() -> #i32 { 0 }

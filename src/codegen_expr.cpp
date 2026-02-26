@@ -1365,16 +1365,6 @@ std::string CodeGenerator::gen_conditional(ExprPtr expr) {
 }
 
 std::string CodeGenerator::gen_cast(ExprPtr expr) {
-    if ((expr && expr->target_type && is_extended_integer_type(expr->target_type)) ||
-        (expr && expr->operand && expr->operand->type && is_extended_integer_type(expr->operand->type))) {
-        std::string operand;
-        {
-            VoidCallGuard guard(*this, false);
-            operand = gen_expr(expr->operand);
-        }
-        return gen_extint_cast(expr, operand);
-    }
-
     // Primitive to byte array conversion (big-endian order)
     if (expr->target_type && expr->target_type->kind == Type::Kind::Array &&
         expr->target_type->element_type &&
@@ -1413,11 +1403,17 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
             emit(storage_prefix() + elem_type + " " + result + "[" + size_str + "];");
             declared_temps.insert(result);
         }
-
-        for (int64_t i = 0; i < length; ++i) {
-            int64_t shift = (length - 1 - i) * 8;
-            emit(result + "[" + std::to_string(i) + "] = (" + elem_type + ")((" + source_tmp +
-                 " >> " + std::to_string(shift) + ") & 0xFF);");
+        if (is_extended_integer_type(expr->operand->type)) {
+            for (int64_t i = 0; i < length; ++i) {
+                emit(result + "[" + std::to_string(i) + "] = (" + elem_type + ")(" + source_tmp +
+                     ".b[" + std::to_string(length - 1 - i) + "]);");
+            }
+        } else {
+            for (int64_t i = 0; i < length; ++i) {
+                int64_t shift = (length - 1 - i) * 8;
+                emit(result + "[" + std::to_string(i) + "] = (" + elem_type + ")((" + source_tmp +
+                     " >> " + std::to_string(shift) + ") & 0xFF);");
+            }
         }
 
         return result;
@@ -1450,6 +1446,16 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
             emit(temp + " |= (" + source + "[" + std::to_string(i) + "] ? (" + target + ")(1u << " + std::to_string(shift) + ") : 0);");
         }
         return temp;
+    }
+
+    if ((expr && expr->target_type && is_extended_integer_type(expr->target_type)) ||
+        (expr && expr->operand && expr->operand->type && is_extended_integer_type(expr->operand->type))) {
+        std::string operand;
+        {
+            VoidCallGuard guard(*this, false);
+            operand = gen_expr(expr->operand);
+        }
+        return gen_extint_cast(expr, operand);
     }
 
     std::string target = gen_type(expr->target_type);
