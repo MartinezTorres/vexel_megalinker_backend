@@ -196,8 +196,8 @@ if ! rg -q "vx_Pixel vx_palette\\[2\\]" megalinker/rom_vx_palette.c; then
 fi
 
 cat > "$SCRIPT_DIR/fixedabi.vx" <<'EOF'
-&^wrap_u(v:#u8.8) -> #u8.8 { v }
-&^wrap_s(v:#i10.6) -> #i10.6 { v }
+&^wrap_u(v:#u8.8) -> #u8.8 { tmp:#u8.8 = v; tmp }
+&^wrap_s(v:#i10.6) -> #i10.6 { tmp:#i10.6 = v; tmp }
 &^main() -> #i32 { 0 }
 EOF
 
