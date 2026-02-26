@@ -26,6 +26,8 @@ cleanup() {
     "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx" \
     "$SCRIPT_DIR/fixedabi.c" "$SCRIPT_DIR/fixedabi.h" "$SCRIPT_DIR/fixedabi__runtime.c" \
     "$SCRIPT_DIR/fixedabi.vx" \
+    "$SCRIPT_DIR/fixedcast.c" "$SCRIPT_DIR/fixedcast.h" "$SCRIPT_DIR/fixedcast__runtime.c" \
+    "$SCRIPT_DIR/fixedcast.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
@@ -213,6 +215,27 @@ if ! rg -q "vx_wrap_u\\(uint16_t vx_v\\);" fixedabi.h; then
 fi
 if ! rg -q "vx_wrap_s\\(int16_t vx_v\\);" fixedabi.h; then
   echo "missing signed fixed-point raw storage wrapper signature in megalinker header"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedcast.vx" <<'EOF'
+&^up_u(x:#u16.0) -> #u8.8 { (#u8.8)x }
+&^down_u(x:#u8.8) -> #u16.0 { (#u16.0)x }
+&^step_u(x:#u8.0) -> #u10.-2 { (#u10.-2)x }
+&^unstep_u(x:#u10.-2) -> #u8.0 { (#u8.0)x }
+&^nz_u(x:#u8.8) -> #b { (#b)x }
+&^retag_s(x:#i8.8) -> #i10.6 { (#i10.6)x }
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedcast "$SCRIPT_DIR/fixedcast.vx" \
+  >/tmp/megalinker_fixedcast.out 2>/tmp/megalinker_fixedcast.err; then
+  cat /tmp/megalinker_fixedcast.out /tmp/megalinker_fixedcast.err
+  echo "fixed-point cast regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_up_u\\(uint16_t vx_x\\);" fixedcast.h; then
+  echo "missing fixed-point cast wrapper signature in megalinker header"
   exit 1
 fi
 

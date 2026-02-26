@@ -1306,6 +1306,185 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
         VoidCallGuard guard(*this, false);
         operand = gen_expr(expr->operand);
     }
+
+    auto is_fixed_primitive_type_local = [&](TypePtr type) {
+        return type &&
+               type->kind == Type::Kind::Primitive &&
+               (is_signed_fixed(type->primitive) || is_unsigned_fixed(type->primitive));
+    };
+    auto fixed_native_meta = [&](TypePtr type, uint64_t& total_bits, bool& is_signed_raw, int64_t& frac_bits) {
+        if (!is_fixed_primitive_type_local(type)) return false;
+        int64_t bits_i64 = type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+        if (!(bits_i64 == 8 || bits_i64 == 16 || bits_i64 == 32 || bits_i64 == 64)) return false;
+        total_bits = static_cast<uint64_t>(bits_i64);
+        is_signed_raw = (type->primitive == PrimitiveType::FixedInt);
+        frac_bits = type->fractional_bits;
+        return true;
+    };
+    auto primitive_intlike_meta = [&](TypePtr type, bool& is_signed, uint64_t& bits) {
+        if (!type || type->kind != Type::Kind::Primitive) return false;
+        if (is_signed_int(type->primitive)) {
+            if (type->integer_bits == 0) return false;
+            is_signed = true;
+            bits = type->integer_bits;
+            return true;
+        }
+        if (is_unsigned_int(type->primitive)) {
+            if (type->integer_bits == 0) return false;
+            is_signed = false;
+            bits = type->integer_bits;
+            return true;
+        }
+        if (type->primitive == PrimitiveType::Bool) {
+            is_signed = false;
+            bits = 1;
+            return true;
+        }
+        return false;
+    };
+    auto declare_temp = [&](TypePtr type) {
+        std::string name = fresh_temp();
+        if (!declared_temps.count(name)) {
+            emit(storage_prefix() + gen_type(type) + " " + name + ";");
+            declared_temps.insert(name);
+        }
+        return name;
+    };
+    auto pow2_u64_literal = [&](uint64_t shift) {
+        return std::to_string((1ULL << shift)) + "ULL";
+    };
+    auto div_pow2_u64_expr = [&](const std::string& value_u64, uint64_t shift) {
+        if (shift >= 64) return std::string("((uint64_t)0)");
+        return "((uint64_t)(" + value_u64 + ") >> " + std::to_string(shift) + ")";
+    };
+    auto div_pow2_s64_expr = [&](const std::string& value_i64, uint64_t shift) {
+        if (shift >= 64) return std::string("((int64_t)0)");
+        if (shift == 0) return "((int64_t)(" + value_i64 + "))";
+        std::string v = "((int64_t)(" + value_i64 + "))";
+        std::string mag = "((uint64_t)(-(" + v + " + 1)) + 1ULL)";
+        std::string q = "((" + mag + ") >> " + std::to_string(shift) + ")";
+        return "((" + v + " < 0) ? -(int64_t)(" + q + ") : (int64_t)(((uint64_t)" + v + ") >> " +
+               std::to_string(shift) + "))";
+    };
+    auto mul_pow2_u64_wrap_expr = [&](const std::string& value_u64, uint64_t shift) {
+        if (shift >= 64) return std::string("((uint64_t)0)");
+        return "((uint64_t)((uint64_t)(" + value_u64 + ") * " + pow2_u64_literal(shift) + "))";
+    };
+
+    TypePtr source_type = expr && expr->operand ? expr->operand->type : nullptr;
+    const bool source_is_fixed = is_fixed_primitive_type_local(source_type);
+    const bool target_is_fixed = is_fixed_primitive_type_local(expr ? expr->target_type : nullptr);
+    if (source_is_fixed || target_is_fixed) {
+        if (!source_type || source_type->kind != Type::Kind::Primitive ||
+            !expr->target_type || expr->target_type->kind != Type::Kind::Primitive) {
+            throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
+                               expr ? expr->location : SourceLocation());
+        }
+
+        if (is_float(source_type->primitive) || is_float(expr->target_type->primitive)) {
+            throw CompileError("Fixed-point casts with floating-point operands are not implemented yet",
+                               expr->location);
+        }
+
+        uint64_t src_fixed_bits = 0;
+        bool src_fixed_signed = false;
+        int64_t src_frac = 0;
+        if (source_is_fixed &&
+            !fixed_native_meta(source_type, src_fixed_bits, src_fixed_signed, src_frac)) {
+            throw CompileError("Fixed-point casts currently support only native storage widths (8/16/32/64)",
+                               expr->location);
+        }
+        uint64_t dst_fixed_bits = 0;
+        bool dst_fixed_signed = false;
+        int64_t dst_frac = 0;
+        if (target_is_fixed &&
+            !fixed_native_meta(expr->target_type, dst_fixed_bits, dst_fixed_signed, dst_frac)) {
+            throw CompileError("Fixed-point casts currently support only native storage widths (8/16/32/64)",
+                               expr->location);
+        }
+        (void)dst_fixed_bits;
+        (void)dst_fixed_signed;
+
+        std::string src_tmp = declare_temp(source_type);
+        emit(src_tmp + " = " + operand + ";");
+
+        auto scaled_i64_or_u64 = [&](bool src_signed, int64_t scale_shift) -> std::pair<std::string, bool> {
+            if (src_signed) {
+                std::string base_i64 = "((int64_t)" + src_tmp + ")";
+                if (scale_shift > 0) {
+                    return {mul_pow2_u64_wrap_expr("(uint64_t)" + base_i64,
+                                                   static_cast<uint64_t>(scale_shift)),
+                            false};
+                }
+                if (scale_shift < 0) {
+                    return {"(uint64_t)(" +
+                                div_pow2_s64_expr(base_i64, static_cast<uint64_t>(-scale_shift)) + ")",
+                            false};
+                }
+                return {"(uint64_t)(" + base_i64 + ")", false};
+            }
+
+            std::string base_u64 = "((uint64_t)" + src_tmp + ")";
+            if (scale_shift > 0) {
+                return {mul_pow2_u64_wrap_expr(base_u64, static_cast<uint64_t>(scale_shift)), true};
+            }
+            if (scale_shift < 0) {
+                return {div_pow2_u64_expr(base_u64, static_cast<uint64_t>(-scale_shift)), true};
+            }
+            return {base_u64, true};
+        };
+
+        if (target_is_fixed) {
+            bool src_signed = false;
+            uint64_t src_bits = 0;
+            if (source_is_fixed) {
+                src_signed = src_fixed_signed;
+                src_bits = src_fixed_bits;
+                (void)src_bits;
+            } else {
+                if (!primitive_intlike_meta(source_type, src_signed, src_bits)) {
+                    throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
+                                       expr->location);
+                }
+                (void)src_bits;
+            }
+            int64_t scale_shift = source_is_fixed ? (dst_frac - src_frac) : dst_frac;
+            auto scaled = scaled_i64_or_u64(src_signed, scale_shift);
+            std::string out_tmp = declare_temp(expr->target_type);
+            emit(out_tmp + " = (" + target + ")(" + scaled.first + ");");
+            return out_tmp;
+        }
+
+        if (expr->target_type->primitive == PrimitiveType::Bool) {
+            std::string out_tmp = declare_temp(expr->target_type);
+            emit(out_tmp + " = (_Bool)(" + src_tmp + " != 0);");
+            return out_tmp;
+        }
+
+        bool target_is_intlike = is_signed_int(expr->target_type->primitive) ||
+                                 is_unsigned_int(expr->target_type->primitive);
+        if (!target_is_intlike) {
+            throw CompileError("Fixed-point casts with floating-point operands are not implemented yet",
+                               expr->location);
+        }
+
+        bool src_signed = source_is_fixed ? src_fixed_signed : false;
+        uint64_t src_bits = source_is_fixed ? src_fixed_bits : 0;
+        (void)src_bits;
+        if (!source_is_fixed) {
+            if (!primitive_intlike_meta(source_type, src_signed, src_bits)) {
+                throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
+                                   expr->location);
+            }
+        }
+
+        int64_t scale_shift = source_is_fixed ? (-src_frac) : 0;
+        auto scaled = scaled_i64_or_u64(src_signed, scale_shift);
+        std::string out_tmp = declare_temp(expr->target_type);
+        emit(out_tmp + " = (" + target + ")(" + scaled.first + ");");
+        return out_tmp;
+    }
+
     return "((" + target + ")" + operand + ")";
 }
 
