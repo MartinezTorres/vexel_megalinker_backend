@@ -24,6 +24,8 @@ cleanup() {
     "$SCRIPT_DIR/sdcccall_ok.vx" "$SCRIPT_DIR/sdcccall_bad_scope.vx" "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
     "$SCRIPT_DIR/linkage.c" "$SCRIPT_DIR/linkage.h" "$SCRIPT_DIR/linkage__runtime.c" \
     "$SCRIPT_DIR/linkage.vx" "$SCRIPT_DIR/bad_width.vx" \
+    "$SCRIPT_DIR/fixedabi.c" "$SCRIPT_DIR/fixedabi.h" "$SCRIPT_DIR/fixedabi__runtime.c" \
+    "$SCRIPT_DIR/fixedabi.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
@@ -190,6 +192,27 @@ if ! rg -q "extern [^;]*vx_Pixel vx_palette\\[2\\];" struct_global.h; then
 fi
 if ! rg -q "vx_Pixel vx_palette\\[2\\]" megalinker/rom_vx_palette.c; then
   echo "missing exported named-struct global definition"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedabi.vx" <<'EOF'
+&^wrap_u(v:#u8.8) -> #u8.8 { v }
+&^wrap_s(v:#i10.6) -> #i10.6 { v }
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedabi "$SCRIPT_DIR/fixedabi.vx" \
+  >/tmp/megalinker_fixedabi.out 2>/tmp/megalinker_fixedabi.err; then
+  cat /tmp/megalinker_fixedabi.out /tmp/megalinker_fixedabi.err
+  echo "fixed-point ABI storage type regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_wrap_u\\(uint16_t vx_v\\);" fixedabi.h; then
+  echo "missing unsigned fixed-point raw storage wrapper signature in megalinker header"
+  exit 1
+fi
+if ! rg -q "vx_wrap_s\\(int16_t vx_v\\);" fixedabi.h; then
+  echo "missing signed fixed-point raw storage wrapper signature in megalinker header"
   exit 1
 fi
 

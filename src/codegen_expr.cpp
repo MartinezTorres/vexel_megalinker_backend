@@ -1234,7 +1234,9 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
         !is_float(expr->operand->type->primitive)) {
 
         int64_t length = resolve_array_length(expr->target_type, expr->location);
-        int64_t bits = type_bits(expr->operand->type->primitive, expr->operand->type->integer_bits);
+        int64_t bits = type_bits(expr->operand->type->primitive,
+                                 expr->operand->type->integer_bits,
+                                 expr->operand->type->fractional_bits);
         if (bits / 8 != length) {
             throw CompileError("Array length/type size mismatch in cast", expr->location);
         }

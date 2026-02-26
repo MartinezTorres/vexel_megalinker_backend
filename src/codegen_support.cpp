@@ -97,6 +97,24 @@ std::string CodeGenerator::gen_type(TypePtr type) {
                             ensure_extint_type(false, type->integer_bits);
                             return extint_type_name(false, type->integer_bits);
                     }
+                case PrimitiveType::FixedInt:
+                case PrimitiveType::FixedUInt: {
+                    int64_t total_bits_i64 = type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+                    if (total_bits_i64 <= 0) {
+                        throw CompileError("Invalid fixed-point storage width in megalinker backend", type->location);
+                    }
+                    uint64_t total_bits = static_cast<uint64_t>(total_bits_i64);
+                    bool signed_raw = type->primitive == PrimitiveType::FixedInt;
+                    switch (total_bits) {
+                        case 8: return signed_raw ? "int8_t" : "uint8_t";
+                        case 16: return signed_raw ? "int16_t" : "uint16_t";
+                        case 32: return signed_raw ? "int32_t" : "uint32_t";
+                        case 64: return signed_raw ? "int64_t" : "uint64_t";
+                        default:
+                            ensure_extint_type(signed_raw, total_bits);
+                            return extint_type_name(signed_raw, total_bits);
+                    }
+                }
                 case PrimitiveType::F16: return "_Float16";
                 case PrimitiveType::F32: return "float";
                 case PrimitiveType::F64: return "double";
