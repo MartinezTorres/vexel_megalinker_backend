@@ -27,7 +27,9 @@ cleanup() {
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
     "$SCRIPT_DIR/bundled_std_math_classify.vx" \
     "$SCRIPT_DIR/mathovr.c" "$SCRIPT_DIR/mathovr.h" "$SCRIPT_DIR/mathovr__runtime.c" \
-    "$SCRIPT_DIR/local_std_math_override.vx"
+    "$SCRIPT_DIR/local_std_math_override.vx" \
+    "$SCRIPT_DIR/arraytmp.c" "$SCRIPT_DIR/arraytmp.h" "$SCRIPT_DIR/arraytmp__runtime.c" \
+    "$SCRIPT_DIR/arraytmp.vx"
   rm -rf "$SCRIPT_DIR/megalinker"
   rm -rf "$SCRIPT_DIR/std"
 }
@@ -188,6 +190,36 @@ if ! rg -q "extern [^;]*vx_Pixel vx_palette\\[2\\];" struct_global.h; then
 fi
 if ! rg -q "vx_Pixel vx_palette\\[2\\]" megalinker/rom_vx_palette.c; then
   echo "missing exported named-struct global definition"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/arraytmp.vx" <<'EOF'
+#Box(v:#i32);
+&(lhs)#Box::.+(rhs:#Box) -> #Box { Box(lhs.v + rhs.v) }
+&!seed() -> #i32;
+&^main() -> #i32 {
+  base:#i32 = seed();
+  xs:#i32[2] = [1, 2];
+  off:#Box = Box(10);
+  boxes:#Box[2] = [Box(base), Box(base + 1)];
+  xs .+= base;
+  boxes .+= off;
+  xs[0] + boxes[1].v
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o arraytmp "$SCRIPT_DIR/arraytmp.vx" \
+  >/tmp/megalinker_arraytmp.out 2>/tmp/megalinker_arraytmp.err; then
+  cat /tmp/megalinker_arraytmp.out /tmp/megalinker_arraytmp.err
+  echo "runtime array-literal temporary regression case failed to compile"
+  exit 1
+fi
+if ! rg -q 'tmp[0-9]+\[[^]]+\][[:space:]]*=[[:space:]]*[{]tmp' arraytmp__runtime.c megalinker/*.c; then
+  echo "array temporary regression case did not trigger runtime array literal temp emission"
+  exit 1
+fi
+if rg -q '^[[:space:]]*static[[:space:]]+.*tmp[0-9]+\[[^]]+\][[:space:]]*=[[:space:]]*[{]tmp' arraytmp__runtime.c megalinker/*.c; then
+  echo "runtime array literal temporaries must not use static aggregate initializers with runtime values"
   exit 1
 fi
 
