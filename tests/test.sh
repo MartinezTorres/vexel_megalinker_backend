@@ -197,7 +197,7 @@ cat > "$SCRIPT_DIR/arraytmp.vx" <<'EOF'
 #Box(v:#i32);
 &(lhs)#Box::.+(rhs:#Box) -> #Box { Box(lhs.v + rhs.v) }
 &!seed() -> #i32;
-&^main() -> #i32 {
+&work() -> #i32 {
   base:#i32 = seed();
   xs:#i32[2] = [1, 2];
   off:#Box = Box(10);
@@ -205,6 +205,9 @@ cat > "$SCRIPT_DIR/arraytmp.vx" <<'EOF'
   xs .+= base;
   boxes .+= off;
   xs[0] + boxes[1].v
+}
+&^main() -> #i32 {
+  work()
 }
 EOF
 
