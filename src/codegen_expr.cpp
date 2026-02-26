@@ -1461,6 +1461,28 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
         return temp;
     }
 
+    // Fixed-point casts that fall through here must not silently use raw extint casts.
+    // Generic extint casts are integer bit-level conversions and do not apply fixed-point scaling.
+    auto is_fixed_primitive_type_pre_ext = [&](TypePtr type) {
+        return type &&
+               type->kind == Type::Kind::Primitive &&
+               (is_signed_fixed(type->primitive) || is_unsigned_fixed(type->primitive));
+    };
+    auto fixed_non_native_nonzero_frac_pre_ext = [&](TypePtr type) {
+        if (!is_fixed_primitive_type_pre_ext(type)) return false;
+        int64_t bits_i64 = type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+        if (bits_i64 <= 0) return false;
+        const bool native_width = (bits_i64 == 8 || bits_i64 == 16 || bits_i64 == 32 || bits_i64 == 64);
+        return !native_width && type->fractional_bits != 0;
+    };
+    if (expr && expr->operand &&
+        (fixed_non_native_nonzero_frac_pre_ext(expr->operand->type) ||
+         fixed_non_native_nonzero_frac_pre_ext(expr->target_type))) {
+        throw CompileError(
+            "Fixed-point casts currently support only native storage widths (8/16/32/64) or zero-fraction fixed-point widths",
+            expr->location);
+    }
+
     if ((expr && expr->target_type && is_extended_integer_type(expr->target_type)) ||
         (expr && expr->operand && expr->operand->type && is_extended_integer_type(expr->operand->type))) {
         std::string operand;
