@@ -1440,10 +1440,23 @@ std::string CodeGenerator::gen_cast(ExprPtr expr) {
             emit(storage_prefix() + target + " " + temp + ";");
             declared_temps.insert(temp);
         }
-        emit(temp + " = 0;");
-        for (int64_t i = 0; i < length; ++i) {
-            int64_t shift = (length - 1 - i);
-            emit(temp + " |= (" + source + "[" + std::to_string(i) + "] ? (" + target + ")(1u << " + std::to_string(shift) + ") : 0);");
+        bool ext_signed = false;
+        uint64_t ext_bits = 0;
+        if (is_extended_integer_type(expr->target_type) &&
+            analyze_extint_type(expr->target_type, ext_signed, ext_bits)) {
+            ensure_extint_type(ext_signed, ext_bits);
+            emit("vx_ai_zero(" + temp + ".b, sizeof(" + temp + ".b));");
+            for (int64_t i = 0; i < length; ++i) {
+                int64_t shift = (length - 1 - i);
+                emit("if (" + source + "[" + std::to_string(i) + "]) vx_ai_set_bit(" + temp + ".b, sizeof(" +
+                     temp + ".b), " + std::to_string(shift) + ", 1);");
+            }
+        } else {
+            emit(temp + " = 0;");
+            for (int64_t i = 0; i < length; ++i) {
+                int64_t shift = (length - 1 - i);
+                emit(temp + " |= (" + source + "[" + std::to_string(i) + "] ? (" + target + ")(1u << " + std::to_string(shift) + ") : 0);");
+            }
         }
         return temp;
     }

@@ -40,6 +40,10 @@ cleanup() {
     "$SCRIPT_DIR/fixedmul72.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
+    "$SCRIPT_DIR/fixedcast72.c" "$SCRIPT_DIR/fixedcast72.h" "$SCRIPT_DIR/fixedcast72__runtime.c" \
+    "$SCRIPT_DIR/fixedcast72.vx" \
+    "$SCRIPT_DIR/boolpack72.c" "$SCRIPT_DIR/boolpack72.h" "$SCRIPT_DIR/boolpack72__runtime.c" \
+    "$SCRIPT_DIR/boolpack72.vx" \
     "$SCRIPT_DIR/fixedden.c" "$SCRIPT_DIR/fixedden.h" "$SCRIPT_DIR/fixedden__runtime.c" \
     "$SCRIPT_DIR/fixedden.vx" \
     "$SCRIPT_DIR/mathclass.c" "$SCRIPT_DIR/mathclass.h" "$SCRIPT_DIR/mathclass__runtime.c" \
@@ -457,6 +461,36 @@ if ! rg -q "vx_ai_cast\\(" fixedcast72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_from_double_u\\(" fixedcast72__runtime.c megalinker/*.c || \
    ! rg -q "\\.b\\[" fixedcast72__runtime.c megalinker/*.c; then
   echo "missing extint helper lowering for non-native fixed-point casts"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/boolpack72.vx" <<'EOF'
+&!seed() -> #b;
+&^pack72() -> #u72 {
+  bits:#b[72];
+  i:#u8 = 0;
+  (i < (#u8)72)@{
+    bits[(#i32)i] = seed();
+    i += (#u8)1;
+  };
+  (#u72)bits
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o boolpack72 "$SCRIPT_DIR/boolpack72.vx" \
+  >/tmp/megalinker_boolpack72.out 2>/tmp/megalinker_boolpack72.err; then
+  cat /tmp/megalinker_boolpack72.out /tmp/megalinker_boolpack72.err
+  echo "bool-array to arbitrary-width integer cast regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_pack72" boolpack72.h; then
+  echo "missing bool-array arbitrary-width cast wrapper declaration"
+  exit 1
+fi
+if ! rg -q "vx_ai_zero\\(" boolpack72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_set_bit\\(" boolpack72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for bool-array arbitrary-width cast"
   exit 1
 fi
 
