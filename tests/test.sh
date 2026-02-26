@@ -36,6 +36,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedbit72.vx" \
     "$SCRIPT_DIR/fixedarith72.c" "$SCRIPT_DIR/fixedarith72.h" "$SCRIPT_DIR/fixedarith72__runtime.c" \
     "$SCRIPT_DIR/fixedarith72.vx" \
+    "$SCRIPT_DIR/fixedarithfrac72.c" "$SCRIPT_DIR/fixedarithfrac72.h" "$SCRIPT_DIR/fixedarithfrac72__runtime.c" \
+    "$SCRIPT_DIR/fixedarithfrac72.vx" \
     "$SCRIPT_DIR/fixedmul72.c" "$SCRIPT_DIR/fixedmul72.h" "$SCRIPT_DIR/fixedmul72__runtime.c" \
     "$SCRIPT_DIR/fixedmul72.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
@@ -374,6 +376,40 @@ if ! rg -q "vx_ai_add\\(" fixedarith72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_neg\\(" fixedarith72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_(s|u)cmp\\(" fixedarith72__runtime.c megalinker/*.c; then
   echo "missing extint helper lowering for non-native fixed-point arithmetic/comparison"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedarithfrac72.vx" <<'EOF'
+&^arith72f(a:#i40.32, b:#i40.32) -> #i40.32 {
+  -a + b - a
+}
+&^cmp72f(a:#i40.32, b:#i40.32) -> #b {
+  (a + b) >= (a - b)
+}
+&^acc72f(a:#u40.32, b:#u40.32) -> #u40.32 {
+  x:#u40.32 = a;
+  x += b;
+  x -= a;
+  x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedarithfrac72 "$SCRIPT_DIR/fixedarithfrac72.vx" \
+  >/tmp/megalinker_fixedarithfrac72.out 2>/tmp/megalinker_fixedarithfrac72.err; then
+  cat /tmp/megalinker_fixedarithfrac72.out /tmp/megalinker_fixedarithfrac72.err
+  echo "non-native fixed-point non-zero-fraction arithmetic/comparison regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_arith72f" fixedarithfrac72.h || ! rg -q "vx_cmp72f" fixedarithfrac72.h || ! rg -q "vx_acc72f" fixedarithfrac72.h; then
+  echo "missing non-native fixed-point non-zero-fraction wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_add\\(" fixedarithfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_sub\\(" fixedarithfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_neg\\(" fixedarithfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_(s|u)cmp\\(" fixedarithfrac72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for non-native fixed-point non-zero-fraction arithmetic/comparison"
   exit 1
 fi
 

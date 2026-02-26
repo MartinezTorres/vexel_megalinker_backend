@@ -27,8 +27,7 @@ bool is_integer_primitive_kind(const TypePtr& type, bool& is_signed, uint64_t& b
         bits = type->integer_bits;
         return bits > 0;
     }
-    if ((type->primitive == PrimitiveType::FixedInt || type->primitive == PrimitiveType::FixedUInt) &&
-        type->fractional_bits == 0) {
+    if (type->primitive == PrimitiveType::FixedInt || type->primitive == PrimitiveType::FixedUInt) {
         int64_t total_bits = vexel::type_bits(type->primitive, type->integer_bits, type->fractional_bits);
         if (total_bits <= 0) return false;
         is_signed = (type->primitive == PrimitiveType::FixedInt);
