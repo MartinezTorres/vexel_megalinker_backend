@@ -894,16 +894,144 @@ std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& oper
         throw CompileError("Internal error: invalid extint cast emission", expr ? expr->location : SourceLocation());
     }
 
+    TypePtr source_type = expr->operand->type;
+    TypePtr target_type = expr->target_type;
+
     bool src_signed = false;
     uint64_t src_bits = 0;
-    bool src_ext = analyze_extint_type(expr->operand->type, src_signed, src_bits);
+    bool src_ext = analyze_extint_type(source_type, src_signed, src_bits);
     bool dst_signed = false;
     uint64_t dst_bits = 0;
-    bool dst_ext = analyze_extint_type(expr->target_type, dst_signed, dst_bits);
+    bool dst_ext = analyze_extint_type(target_type, dst_signed, dst_bits);
+
+    auto is_fixed_primitive_type = [&](TypePtr type) {
+        return type &&
+               type->kind == Type::Kind::Primitive &&
+               (type->primitive == PrimitiveType::FixedInt ||
+                type->primitive == PrimitiveType::FixedUInt);
+    };
+    auto fixed_meta = [&](TypePtr type, bool& is_signed_out, uint64_t& bits_out, int64_t& frac_out) -> bool {
+        if (!is_fixed_primitive_type(type)) return false;
+        int64_t bits_i64 = type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+        if (bits_i64 <= 0) return false;
+        is_signed_out = (type->primitive == PrimitiveType::FixedInt);
+        bits_out = static_cast<uint64_t>(bits_i64);
+        frac_out = type->fractional_bits;
+        return true;
+    };
+    auto primitive_intlike_meta = [&](TypePtr type, bool& is_signed_out, uint64_t& bits_out) {
+        if (!type || type->kind != Type::Kind::Primitive) return false;
+        if (type->primitive == PrimitiveType::Int) {
+            if (type->integer_bits == 0) return false;
+            is_signed_out = true;
+            bits_out = type->integer_bits;
+            return true;
+        }
+        if (type->primitive == PrimitiveType::UInt) {
+            if (type->integer_bits == 0) return false;
+            is_signed_out = false;
+            bits_out = type->integer_bits;
+            return true;
+        }
+        if (type->primitive == PrimitiveType::Bool) {
+            is_signed_out = false;
+            bits_out = 1;
+            return true;
+        }
+        return false;
+    };
+    auto declare_bool_temp = [&]() {
+        std::string name = fresh_temp();
+        if (!declared_temps.count(name)) {
+            emit(storage_prefix() + std::string("_Bool ") + name + ";");
+            declared_temps.insert(name);
+        }
+        return name;
+    };
+    auto declare_ext_temp = [&](bool is_signed_tmp, uint64_t bits_tmp) {
+        ensure_extint_type(is_signed_tmp, bits_tmp);
+        std::string tmp = fresh_temp();
+        if (!declared_temps.count(tmp)) {
+            emit(storage_prefix() + extint_type_name(is_signed_tmp, bits_tmp) + " " + tmp + ";");
+            declared_temps.insert(tmp);
+        }
+        return tmp;
+    };
+    auto emit_ext_cast = [&](const std::string& out,
+                             bool out_signed,
+                             uint64_t out_bits,
+                             const std::string& in,
+                             bool in_signed,
+                             uint64_t in_bits) {
+        (void)out_signed;
+        emit("vx_ai_cast(" + out + ".b, sizeof(" + out + ".b), " + std::to_string(extint_top_mask(out_bits)) +
+             ", " + in + ".b, sizeof(" + in + ".b), " +
+             std::string(in_signed ? "1" : "0") + ", " + std::to_string(extint_sign_mask(in_bits)) + ");");
+    };
+    auto checked_abs_u64 = [&](int64_t v, const std::string& context) -> uint64_t {
+        if (v == std::numeric_limits<int64_t>::min()) {
+            throw CompileError("Fixed-point fractional width overflow in " + context, expr->location);
+        }
+        return v < 0 ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v);
+    };
+    auto checked_add_u64 = [&](uint64_t a, uint64_t b, const std::string& context) -> uint64_t {
+        if (a > std::numeric_limits<uint64_t>::max() - b) {
+            throw CompileError("Fixed-point width overflow in " + context, expr->location);
+        }
+        return a + b;
+    };
+    auto ext_scale_pow2_trunc_zero = [&](const std::string& out,
+                                         const std::string& in,
+                                         bool in_signed,
+                                         uint64_t bits,
+                                         int64_t shift) {
+        std::string top_mask = std::to_string(extint_top_mask(bits));
+        std::string sign_mask = std::to_string(extint_sign_mask(bits));
+        if (shift == 0) {
+            emit(out + " = " + in + ";");
+            return;
+        }
+        if (shift > 0) {
+            emit("vx_ai_shl(" + out + ".b, " + in + ".b, sizeof(" + out + ".b), " +
+                 std::to_string(static_cast<uint64_t>(shift)) + ", " + top_mask + ");");
+            return;
+        }
+        uint64_t rshift = static_cast<uint64_t>(-shift);
+        if (!in_signed) {
+            emit("vx_ai_shr_u(" + out + ".b, " + in + ".b, sizeof(" + out + ".b), " +
+                 std::to_string(rshift) + ", " + top_mask + ");");
+            return;
+        }
+        std::string neg = declare_bool_temp();
+        std::string abs = declare_ext_temp(true, bits);
+        std::string shr = declare_ext_temp(true, bits);
+        emit(neg + " = vx_ai_signbit(" + in + ".b, sizeof(" + in + ".b), " + sign_mask + ");");
+        emit("if (" + neg + ") vx_ai_neg(" + abs + ".b, " + in + ".b, sizeof(" + abs + ".b), " +
+             top_mask + "); else " + abs + " = " + in + ";");
+        emit("vx_ai_shr_u(" + shr + ".b, " + abs + ".b, sizeof(" + shr + ".b), " +
+             std::to_string(rshift) + ", " + top_mask + ");");
+        emit("if (" + neg + ") vx_ai_neg(" + out + ".b, " + shr + ".b, sizeof(" + out + ".b), " +
+             top_mask + "); else " + out + " = " + shr + ";");
+    };
+    auto ext_to_double_expr = [&](const std::string& in, bool in_signed, uint64_t in_bits) {
+        if (!in_signed) {
+            return std::string("vx_ai_to_double_u(") + in + ".b, sizeof(" + in + ".b))";
+        }
+        std::string tmp = declare_ext_temp(true, in_bits);
+        emit(tmp + " = " + in + ";");
+        std::string sign_mask = std::to_string(extint_sign_mask(in_bits));
+        std::string top_mask = std::to_string(extint_top_mask(in_bits));
+        emit("if (vx_ai_signbit(" + tmp + ".b, sizeof(" + tmp + ".b), " + sign_mask +
+             ")) vx_ai_neg(" + tmp + ".b, " + tmp + ".b, sizeof(" + tmp + ".b), " + top_mask + ");");
+        return std::string("(vx_ai_signbit(") + in + ".b, sizeof(" + in + ".b), " + sign_mask +
+               ") ? -vx_ai_to_double_u(" + tmp + ".b, sizeof(" + tmp + ".b)) : vx_ai_to_double_u(" +
+               tmp + ".b, sizeof(" + tmp + ".b)))";
+    };
+
     std::string operand_use = operand;
     if (src_ext) {
         std::string tmp = fresh_temp();
-        std::string t = gen_type(expr->operand->type);
+        std::string t = gen_type(source_type);
         if (!declared_temps.count(tmp)) {
             emit(storage_prefix() + t + " " + tmp + ";");
             declared_temps.insert(tmp);
@@ -912,10 +1040,204 @@ std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& oper
         operand_use = tmp;
     }
 
+    const bool source_is_fixed = is_fixed_primitive_type(source_type);
+    const bool target_is_fixed = is_fixed_primitive_type(target_type);
+    bool src_fixed_signed = false;
+    uint64_t src_fixed_bits = 0;
+    int64_t src_fixed_frac = 0;
+    if (source_is_fixed &&
+        !fixed_meta(source_type, src_fixed_signed, src_fixed_bits, src_fixed_frac)) {
+        throw CompileError("Invalid fixed-point cast source type", expr->location);
+    }
+    bool dst_fixed_signed = false;
+    uint64_t dst_fixed_bits = 0;
+    int64_t dst_fixed_frac = 0;
+    if (target_is_fixed &&
+        !fixed_meta(target_type, dst_fixed_signed, dst_fixed_bits, dst_fixed_frac)) {
+        throw CompileError("Invalid fixed-point cast target type", expr->location);
+    }
+
+    if (source_is_fixed || target_is_fixed) {
+        std::string scalar_source = operand_use;
+        if (!src_ext) {
+            std::string src_tmp = fresh_temp();
+            std::string src_type = gen_type(source_type);
+            if (!declared_temps.count(src_tmp)) {
+                emit(storage_prefix() + src_type + " " + src_tmp + ";");
+                declared_temps.insert(src_tmp);
+            }
+            emit(src_tmp + " = " + operand + ";");
+            scalar_source = src_tmp;
+        }
+
+        auto emit_native_from_ext = [&](const std::string& in,
+                                        bool in_signed,
+                                        uint64_t in_bits,
+                                        TypePtr dst_type) {
+            PrimitiveType p = dst_type->primitive;
+            if (p == PrimitiveType::Bool) {
+                return std::string("(!vx_ai_is_zero(") + in + ".b, sizeof(" + in + ".b)))";
+            }
+            if (p == PrimitiveType::Int || p == PrimitiveType::FixedInt) {
+                std::string base = "vx_ai_to_i64_trunc(" + in + ".b, sizeof(" + in + ".b), " +
+                                   std::to_string(extint_sign_mask(in_bits)) + ")";
+                return "((" + gen_type(dst_type) + ")" + base + ")";
+            }
+            if (p == PrimitiveType::UInt || p == PrimitiveType::FixedUInt) {
+                std::string base = "vx_ai_to_u64_trunc(" + in + ".b, sizeof(" + in + ".b))";
+                return "((" + gen_type(dst_type) + ")" + base + ")";
+            }
+            if (is_float(p)) {
+                return "((" + gen_type(dst_type) + ")" + ext_to_double_expr(in, in_signed, in_bits) + ")";
+            }
+            throw CompileError("Unsupported fixed-point cast target", expr->location);
+        };
+
+        if (target_is_fixed) {
+            if (source_type->kind == Type::Kind::Primitive && is_float(source_type->primitive)) {
+                std::string out = declare_ext_temp(dst_fixed_signed, dst_fixed_bits);
+                emit("vx_ai_from_double_u(" + out + ".b, sizeof(" + out + ".b), " +
+                     std::to_string(extint_top_mask(dst_fixed_bits)) + ", fabs(ldexp((double)" +
+                     scalar_source + ", " + std::to_string(dst_fixed_frac) + "))); ");
+                if (dst_fixed_signed) {
+                    emit("if ((double)" + scalar_source + " < 0) vx_ai_neg(" + out + ".b, " + out +
+                         ".b, sizeof(" + out + ".b), " + std::to_string(extint_top_mask(dst_fixed_bits)) + ");");
+                }
+                if (dst_ext) return out;
+                return emit_native_from_ext(out, dst_fixed_signed, dst_fixed_bits, target_type);
+            }
+
+            bool src_raw_signed = false;
+            uint64_t src_raw_bits = 0;
+            int64_t src_raw_frac = 0;
+            std::string src_raw;
+            if (source_is_fixed) {
+                src_raw_signed = src_fixed_signed;
+                src_raw_bits = src_fixed_bits;
+                src_raw_frac = src_fixed_frac;
+                if (src_ext) {
+                    src_raw = operand_use;
+                } else {
+                    src_raw = declare_ext_temp(src_raw_signed, src_raw_bits);
+                    if (src_raw_signed) {
+                        emit("vx_ai_from_i64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                             std::to_string(extint_top_mask(src_raw_bits)) + ", (int64_t)" + scalar_source + ");");
+                    } else {
+                        emit("vx_ai_from_u64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                             std::to_string(extint_top_mask(src_raw_bits)) + ", (uint64_t)" + scalar_source + ");");
+                    }
+                }
+            } else {
+                bool src_int_signed = false;
+                uint64_t src_int_bits = 0;
+                if (!primitive_intlike_meta(source_type, src_int_signed, src_int_bits)) {
+                    throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
+                                       expr->location);
+                }
+                src_raw_signed = src_int_signed;
+                src_raw_bits = src_int_bits;
+                src_raw_frac = 0;
+                if (src_ext) {
+                    src_raw = operand_use;
+                } else {
+                    src_raw = declare_ext_temp(src_raw_signed, src_raw_bits);
+                    if (source_type->primitive == PrimitiveType::Bool) {
+                        emit("vx_ai_from_u64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                             std::to_string(extint_top_mask(src_raw_bits)) + ", (uint64_t)((" +
+                             scalar_source + ") ? 1u : 0u));");
+                    } else if (src_raw_signed) {
+                        emit("vx_ai_from_i64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                             std::to_string(extint_top_mask(src_raw_bits)) + ", (int64_t)" + scalar_source + ");");
+                    } else {
+                        emit("vx_ai_from_u64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                             std::to_string(extint_top_mask(src_raw_bits)) + ", (uint64_t)" + scalar_source + ");");
+                    }
+                }
+            }
+
+            int64_t scale_shift = dst_fixed_frac - src_raw_frac;
+            uint64_t work_bits = checked_add_u64(src_raw_bits,
+                                                 checked_abs_u64(scale_shift, "fixed-point cast scaling"),
+                                                 "fixed-point cast scaling");
+            work_bits = checked_add_u64(work_bits, 1, "fixed-point cast scaling");
+            std::string widened = declare_ext_temp(src_raw_signed, work_bits);
+            emit_ext_cast(widened, src_raw_signed, work_bits, src_raw, src_raw_signed, src_raw_bits);
+            std::string scaled = declare_ext_temp(src_raw_signed, work_bits);
+            ext_scale_pow2_trunc_zero(scaled, widened, src_raw_signed, work_bits, scale_shift);
+            std::string out_raw = declare_ext_temp(dst_fixed_signed, dst_fixed_bits);
+            emit_ext_cast(out_raw, dst_fixed_signed, dst_fixed_bits, scaled, src_raw_signed, work_bits);
+            if (dst_ext) return out_raw;
+            return emit_native_from_ext(out_raw, dst_fixed_signed, dst_fixed_bits, target_type);
+        }
+
+        if (!source_is_fixed) {
+            throw CompileError("Unsupported fixed-point cast source", expr->location);
+        }
+
+        std::string src_raw = operand_use;
+        if (!src_ext) {
+            src_raw = declare_ext_temp(src_fixed_signed, src_fixed_bits);
+            if (src_fixed_signed) {
+                emit("vx_ai_from_i64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                     std::to_string(extint_top_mask(src_fixed_bits)) + ", (int64_t)" + scalar_source + ");");
+            } else {
+                emit("vx_ai_from_u64(" + src_raw + ".b, sizeof(" + src_raw + ".b), " +
+                     std::to_string(extint_top_mask(src_fixed_bits)) + ", (uint64_t)" + scalar_source + ");");
+            }
+        }
+
+        if (target_type->kind != Type::Kind::Primitive) {
+            throw CompileError("Fixed-point casts currently support only primitive numeric/bool casts",
+                               expr->location);
+        }
+
+        if (is_float(target_type->primitive)) {
+            std::string out_tmp = fresh_temp();
+            if (!declared_temps.count(out_tmp)) {
+                emit(storage_prefix() + gen_type(target_type) + " " + out_tmp + ";");
+                declared_temps.insert(out_tmp);
+            }
+            emit(out_tmp + " = (" + gen_type(target_type) + ")ldexp(" +
+                 ext_to_double_expr(src_raw, src_fixed_signed, src_fixed_bits) + ", " +
+                 std::to_string(-src_fixed_frac) + ");");
+            return out_tmp;
+        }
+
+        uint64_t work_bits = checked_add_u64(src_fixed_bits,
+                                             checked_abs_u64(src_fixed_frac, "fixed-point cast scaling"),
+                                             "fixed-point cast scaling");
+        work_bits = checked_add_u64(work_bits, 1, "fixed-point cast scaling");
+        std::string widened = declare_ext_temp(src_fixed_signed, work_bits);
+        emit_ext_cast(widened, src_fixed_signed, work_bits, src_raw, src_fixed_signed, src_fixed_bits);
+        std::string scaled = declare_ext_temp(src_fixed_signed, work_bits);
+        ext_scale_pow2_trunc_zero(scaled, widened, src_fixed_signed, work_bits, -src_fixed_frac);
+
+        if (target_type->primitive == PrimitiveType::Bool) {
+            return std::string("(!vx_ai_is_zero(") + scaled + ".b, sizeof(" + scaled + ".b)))";
+        }
+        if (target_type->primitive == PrimitiveType::Int ||
+            target_type->primitive == PrimitiveType::UInt) {
+            if (dst_ext) {
+                std::string out_raw = declare_ext_temp(dst_signed, dst_bits);
+                emit_ext_cast(out_raw, dst_signed, dst_bits, scaled, src_fixed_signed, work_bits);
+                return out_raw;
+            }
+            PrimitiveType p = target_type->primitive;
+            if (p == PrimitiveType::Int) {
+                std::string base = "vx_ai_to_i64_trunc(" + scaled + ".b, sizeof(" + scaled + ".b), " +
+                                   std::to_string(extint_sign_mask(work_bits)) + ")";
+                return "((" + gen_type(target_type) + ")" + base + ")";
+            }
+            std::string base = "vx_ai_to_u64_trunc(" + scaled + ".b, sizeof(" + scaled + ".b))";
+            return "((" + gen_type(target_type) + ")" + base + ")";
+        }
+        throw CompileError("Unsupported fixed-point cast target", expr->location);
+    }
+
     if (dst_ext) {
         ensure_extint_type(dst_signed, dst_bits);
         std::string out = fresh_temp();
-        std::string out_type = gen_type(expr->target_type);
+        std::string out_type = gen_type(target_type);
         if (!declared_temps.count(out)) {
             emit(storage_prefix() + out_type + " " + out + ";");
             declared_temps.insert(out);
@@ -928,7 +1250,7 @@ std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& oper
             return out;
         }
 
-        TypePtr src_ty = expr->operand->type;
+        TypePtr src_ty = source_type;
         if (src_ty->kind == Type::Kind::Primitive && src_ty->primitive == PrimitiveType::Bool) {
             emit("vx_ai_from_u64(" + out + ".b, sizeof(" + out + ".b), " + std::to_string(extint_top_mask(dst_bits)) +
                  ", (uint64_t)((" + operand + ") ? 1u : 0u));");
@@ -964,22 +1286,22 @@ std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& oper
 
     if (src_ext) {
         ensure_extint_type(src_signed, src_bits);
-        if (!expr->target_type || expr->target_type->kind != Type::Kind::Primitive) {
+        if (!target_type || target_type->kind != Type::Kind::Primitive) {
             throw CompileError("Unsupported cast from arbitrary-width integer in C backend", expr->location);
         }
 
-        PrimitiveType p = expr->target_type->primitive;
+        PrimitiveType p = target_type->primitive;
         if (p == PrimitiveType::Bool) {
             return "(!vx_ai_is_zero((" + operand_use + ").b, sizeof((" + operand_use + ").b)))";
         }
         if (p == PrimitiveType::Int) {
             std::string base = "vx_ai_to_i64_trunc((" + operand_use + ").b, sizeof((" + operand_use + ").b), " +
                                std::to_string(extint_sign_mask(src_bits)) + ")";
-            return "((" + gen_type(expr->target_type) + ")" + base + ")";
+            return "((" + gen_type(target_type) + ")" + base + ")";
         }
         if (p == PrimitiveType::UInt) {
             std::string base = "vx_ai_to_u64_trunc((" + operand_use + ").b, sizeof((" + operand_use + ").b))";
-            return "((" + gen_type(expr->target_type) + ")" + base + ")";
+            return "((" + gen_type(target_type) + ")" + base + ")";
         }
         if (is_float(p)) {
             std::string mag = "vx_ai_to_double_u((" + operand_use + ").b, sizeof((" + operand_use + ").b))";
@@ -996,7 +1318,7 @@ std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& oper
                 mag = "(vx_ai_signbit((" + operand_use + ").b, sizeof((" + operand_use + ").b), " + std::to_string(extint_sign_mask(src_bits)) +
                       ") ? -vx_ai_to_double_u(" + tmp + ".b, sizeof(" + tmp + ".b)) : vx_ai_to_double_u(" + tmp + ".b, sizeof(" + tmp + ".b)))";
             }
-            return "((" + gen_type(expr->target_type) + ")" + mag + ")";
+            return "((" + gen_type(target_type) + ")" + mag + ")";
         }
         throw CompileError("Unsupported cast from arbitrary-width integer in C backend", expr->location);
     }

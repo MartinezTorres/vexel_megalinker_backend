@@ -46,6 +46,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/fixedcast72.c" "$SCRIPT_DIR/fixedcast72.h" "$SCRIPT_DIR/fixedcast72__runtime.c" \
     "$SCRIPT_DIR/fixedcast72.vx" \
+    "$SCRIPT_DIR/fixedcastfrac72.c" "$SCRIPT_DIR/fixedcastfrac72.h" "$SCRIPT_DIR/fixedcastfrac72__runtime.c" \
+    "$SCRIPT_DIR/fixedcastfrac72.vx" \
     "$SCRIPT_DIR/boolpack72.c" "$SCRIPT_DIR/boolpack72.h" "$SCRIPT_DIR/boolpack72__runtime.c" \
     "$SCRIPT_DIR/boolpack72.vx" \
     "$SCRIPT_DIR/fixedden.c" "$SCRIPT_DIR/fixedden.h" "$SCRIPT_DIR/fixedden__runtime.c" \
@@ -530,6 +532,36 @@ if ! rg -q "vx_ai_cast\\(" fixedcast72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_from_double_u\\(" fixedcast72__runtime.c megalinker/*.c || \
    ! rg -q "\\.b\\[" fixedcast72__runtime.c megalinker/*.c; then
   echo "missing extint helper lowering for non-native fixed-point casts"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedcastfrac72.vx" <<'EOF'
+&^to_u16_8(a:#u40.32) -> #u16.8 { (#u16.8)a }
+&^roundtrip_u(a:#u40.32) -> #u40.32 { (#u40.32)((#u16.8)a) }
+&^to_i24(a:#i40.32) -> #i24 { (#i24)a }
+&^to_i40_32(a:#i24) -> #i40.32 { (#i40.32)a }
+&^to_float(a:#i40.32) -> #f64 { (#f64)a }
+&^from_float(a:#f64) -> #i40.32 { (#i40.32)a }
+&^to_bool(a:#i40.32) -> #b { (#b)a }
+&^to_u40(a:#i40.32) -> #u40 { (#u40)a }
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedcastfrac72 "$SCRIPT_DIR/fixedcastfrac72.vx" \
+  >/tmp/megalinker_fixedcastfrac72.out 2>/tmp/megalinker_fixedcastfrac72.err; then
+  cat /tmp/megalinker_fixedcastfrac72.out /tmp/megalinker_fixedcastfrac72.err
+  echo "non-native fixed-point non-zero-fraction cast regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_roundtrip_u" fixedcastfrac72.h || ! rg -q "vx_from_float" fixedcastfrac72.h; then
+  echo "missing non-native fixed-point non-zero-fraction cast wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_shl\\(" fixedcastfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_shr_u\\(" fixedcastfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_from_double_u\\(" fixedcastfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_to_double_u\\(" fixedcastfrac72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for non-native fixed-point non-zero-fraction casts"
   exit 1
 fi
 
