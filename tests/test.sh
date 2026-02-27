@@ -40,6 +40,8 @@ cleanup() {
     "$SCRIPT_DIR/fixedarithfrac72.vx" \
     "$SCRIPT_DIR/fixedmul72.c" "$SCRIPT_DIR/fixedmul72.h" "$SCRIPT_DIR/fixedmul72__runtime.c" \
     "$SCRIPT_DIR/fixedmul72.vx" \
+    "$SCRIPT_DIR/fixedmulfrac72.c" "$SCRIPT_DIR/fixedmulfrac72.h" "$SCRIPT_DIR/fixedmulfrac72__runtime.c" \
+    "$SCRIPT_DIR/fixedmulfrac72.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/fixedcast72.c" "$SCRIPT_DIR/fixedcast72.h" "$SCRIPT_DIR/fixedcast72__runtime.c" \
@@ -450,6 +452,37 @@ fi
 if ! rg -q "vx_ai_mul\\(" fixedmul72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_udivmod\\(" fixedmul72__runtime.c megalinker/*.c; then
   echo "missing extint helper lowering for non-native fixed-point mul/div/mod"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedmulfrac72.vx" <<'EOF'
+&^acc72_u(a:#u40.32, b:#u40.32, c:#u40.32) -> #u40.32 {
+  x:#u40.32 = a;
+  x = x * b;
+  x = x / c;
+  x = x % b;
+  x *= b;
+  x /= c;
+  x %= b;
+  x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedmulfrac72 "$SCRIPT_DIR/fixedmulfrac72.vx" \
+  >/tmp/megalinker_fixedmulfrac72.out 2>/tmp/megalinker_fixedmulfrac72.err; then
+  cat /tmp/megalinker_fixedmulfrac72.out /tmp/megalinker_fixedmulfrac72.err
+  echo "non-native fixed-point non-zero-fraction mul/div/mod regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_acc72_u" fixedmulfrac72.h; then
+  echo "missing non-native fixed-point non-zero-fraction mul/div/mod wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_mul\\(" fixedmulfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_udivmod\\(" fixedmulfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_shr_u\\(" fixedmulfrac72__runtime.c megalinker/*.c; then
+  echo "missing extint helper lowering for non-native fixed-point non-zero-fraction mul/div/mod"
   exit 1
 fi
 

@@ -646,6 +646,159 @@ std::string CodeGenerator::gen_extint_binary(ExprPtr expr, const std::string& le
     std::string top_mask = std::to_string(extint_top_mask(result_bits));
     std::string sign_mask = std::to_string(extint_sign_mask(result_bits));
 
+    auto fixed_extint_meta = [&](TypePtr type, uint64_t& bits, bool& is_signed_raw, int64_t& frac_bits) {
+        if (!type || type->kind != Type::Kind::Primitive) return false;
+        if (type->primitive != PrimitiveType::FixedInt && type->primitive != PrimitiveType::FixedUInt) return false;
+        int64_t bits_i64 = type_bits(type->primitive, type->integer_bits, type->fractional_bits);
+        if (bits_i64 <= 0) return false;
+        bits = static_cast<uint64_t>(bits_i64);
+        is_signed_raw = (type->primitive == PrimitiveType::FixedInt);
+        frac_bits = type->fractional_bits;
+        return true;
+    };
+    auto add_checked_u64 = [&](uint64_t a, uint64_t b, const std::string& context) -> uint64_t {
+        if (a > std::numeric_limits<uint64_t>::max() - b) {
+            throw CompileError("Fixed-point width overflow in " + context, expr->location);
+        }
+        return a + b;
+    };
+    auto abs_frac_u64 = [&](int64_t frac_bits, const std::string& context) -> uint64_t {
+        if (frac_bits == std::numeric_limits<int64_t>::min()) {
+            throw CompileError("Fixed-point fractional width overflow in " + context, expr->location);
+        }
+        return frac_bits < 0 ? static_cast<uint64_t>(-frac_bits) : static_cast<uint64_t>(frac_bits);
+    };
+    uint64_t fixed_bits = 0;
+    bool fixed_signed = false;
+    int64_t fixed_frac = 0;
+    if ((op == "*" || op == "/") &&
+        fixed_extint_meta(expr ? expr->type : nullptr, fixed_bits, fixed_signed, fixed_frac) &&
+        fixed_frac != 0) {
+        uint64_t work_bits = 0;
+        if (op == "*") {
+            work_bits = add_checked_u64(fixed_bits, fixed_bits, "fixed-point multiplication");
+            if (fixed_frac < 0) {
+                work_bits = add_checked_u64(work_bits, abs_frac_u64(fixed_frac, "fixed-point multiplication"),
+                                            "fixed-point multiplication");
+            }
+        } else {
+            work_bits = add_checked_u64(fixed_bits, fixed_bits, "fixed-point division");
+            work_bits = add_checked_u64(work_bits, abs_frac_u64(fixed_frac, "fixed-point division"),
+                                        "fixed-point division");
+        }
+        if (work_bits <= fixed_bits) {
+            work_bits = add_checked_u64(fixed_bits, 1, "fixed-point widening");
+        }
+
+        ensure_extint_type(fixed_signed, work_bits);
+        std::string work_type = extint_type_name(fixed_signed, work_bits);
+        std::string work_top_mask = std::to_string(extint_top_mask(work_bits));
+        std::string work_sign_mask = std::to_string(extint_sign_mask(work_bits));
+        auto declare_work_temp = [&]() {
+            std::string tmp = fresh_temp();
+            if (!declared_temps.count(tmp)) {
+                emit(storage_prefix() + work_type + " " + tmp + ";");
+                declared_temps.insert(tmp);
+            }
+            return tmp;
+        };
+        std::string lhs_wide = declare_work_temp();
+        std::string rhs_wide = declare_work_temp();
+        emit("vx_ai_cast(" + lhs_wide + ".b, sizeof(" + lhs_wide + ".b), " + work_top_mask +
+             ", (" + left_use + ").b, sizeof((" + left_use + ").b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + std::to_string(extint_sign_mask(fixed_bits)) + ");");
+        emit("vx_ai_cast(" + rhs_wide + ".b, sizeof(" + rhs_wide + ".b), " + work_top_mask +
+             ", (" + right_use + ").b, sizeof((" + right_use + ").b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + std::to_string(extint_sign_mask(fixed_bits)) + ");");
+
+        std::string scaled = declare_work_temp();
+        if (op == "*") {
+            std::string prod = declare_work_temp();
+            emit("vx_ai_mul(" + prod + ".b, (" + lhs_wide + ").b, (" + rhs_wide + ").b, sizeof(" + prod + ".b), " +
+                 work_top_mask + ");");
+            if (fixed_frac > 0) {
+                uint64_t shift = static_cast<uint64_t>(fixed_frac);
+                if (fixed_signed) {
+                    std::string neg = fresh_temp();
+                    if (!declared_temps.count(neg)) {
+                        emit(storage_prefix() + std::string("_Bool ") + neg + ";");
+                        declared_temps.insert(neg);
+                    }
+                    std::string abs = declare_work_temp();
+                    std::string shr = declare_work_temp();
+                    emit(neg + " = vx_ai_signbit(" + prod + ".b, sizeof(" + prod + ".b), " + work_sign_mask + ");");
+                    emit("if (" + neg + ") vx_ai_neg(" + abs + ".b, " + prod + ".b, sizeof(" + abs + ".b), " +
+                         work_top_mask + "); else " + abs + " = " + prod + ";");
+                    emit("vx_ai_shr_u(" + shr + ".b, " + abs + ".b, sizeof(" + shr + ".b), " + std::to_string(shift) +
+                         ", " + work_top_mask + ");");
+                    emit("if (" + neg + ") vx_ai_neg(" + scaled + ".b, " + shr + ".b, sizeof(" + scaled + ".b), " +
+                         work_top_mask + "); else " + scaled + " = " + shr + ";");
+                } else {
+                    emit("vx_ai_shr_u(" + scaled + ".b, " + prod + ".b, sizeof(" + scaled + ".b), " +
+                         std::to_string(shift) + ", " + work_top_mask + ");");
+                }
+            } else if (fixed_frac < 0) {
+                emit("vx_ai_shl(" + scaled + ".b, " + prod + ".b, sizeof(" + scaled + ".b), " +
+                     std::to_string(static_cast<uint64_t>(-fixed_frac)) + ", " + work_top_mask + ");");
+            } else {
+                emit(scaled + " = " + prod + ";");
+            }
+        } else {
+            std::string num = declare_work_temp();
+            std::string den = declare_work_temp();
+            emit(num + " = " + lhs_wide + ";");
+            emit(den + " = " + rhs_wide + ";");
+            if (fixed_frac > 0) {
+                std::string num_shifted = declare_work_temp();
+                emit("vx_ai_shl(" + num_shifted + ".b, " + num + ".b, sizeof(" + num + ".b), " +
+                     std::to_string(static_cast<uint64_t>(fixed_frac)) + ", " + work_top_mask + ");");
+                emit(num + " = " + num_shifted + ";");
+            } else if (fixed_frac < 0) {
+                std::string den_shifted = declare_work_temp();
+                emit("vx_ai_shl(" + den_shifted + ".b, " + den + ".b, sizeof(" + den + ".b), " +
+                     std::to_string(static_cast<uint64_t>(-fixed_frac)) + ", " + work_top_mask + ");");
+                emit(den + " = " + den_shifted + ";");
+            }
+
+            if (!fixed_signed) {
+                std::string rem = declare_work_temp();
+                emit("vx_ai_udivmod(" + scaled + ".b, " + rem + ".b, " + num + ".b, " + den + ".b, sizeof(" +
+                     scaled + ".b), " + work_top_mask + ");");
+            } else {
+                std::string q = declare_work_temp();
+                std::string rem = declare_work_temp();
+                std::string num_abs = declare_work_temp();
+                std::string den_abs = declare_work_temp();
+                std::string num_neg = fresh_temp();
+                std::string den_neg = fresh_temp();
+                if (!declared_temps.count(num_neg)) {
+                    emit(storage_prefix() + std::string("_Bool ") + num_neg + ";");
+                    declared_temps.insert(num_neg);
+                }
+                if (!declared_temps.count(den_neg)) {
+                    emit(storage_prefix() + std::string("_Bool ") + den_neg + ";");
+                    declared_temps.insert(den_neg);
+                }
+                emit(num_neg + " = vx_ai_signbit(" + num + ".b, sizeof(" + num + ".b), " + work_sign_mask + ");");
+                emit(den_neg + " = vx_ai_signbit(" + den + ".b, sizeof(" + den + ".b), " + work_sign_mask + ");");
+                emit("if (" + num_neg + ") vx_ai_neg(" + num_abs + ".b, " + num + ".b, sizeof(" + num_abs + ".b), " +
+                     work_top_mask + "); else " + num_abs + " = " + num + ";");
+                emit("if (" + den_neg + ") vx_ai_neg(" + den_abs + ".b, " + den + ".b, sizeof(" + den_abs + ".b), " +
+                     work_top_mask + "); else " + den_abs + " = " + den + ";");
+                emit("vx_ai_udivmod(" + q + ".b, " + rem + ".b, " + num_abs + ".b, " + den_abs + ".b, sizeof(" +
+                     q + ".b), " + work_top_mask + ");");
+                emit(scaled + " = " + q + ";");
+                emit("if (" + num_neg + " != " + den_neg + ") vx_ai_neg(" + scaled + ".b, " + scaled +
+                     ".b, sizeof(" + scaled + ".b), " + work_top_mask + ");");
+            }
+        }
+
+        emit("vx_ai_cast(" + out + ".b, sizeof(" + out + ".b), " + top_mask +
+             ", " + scaled + ".b, sizeof(" + scaled + ".b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + work_sign_mask + ");");
+        return out;
+    }
+
     if (op == "+") {
         emit("vx_ai_add(" + out + ".b, (" + left_use + ").b, (" + right_use + ").b, sizeof(" + out + ".b), " + top_mask + ");");
         return out;
@@ -893,6 +1046,20 @@ std::string CodeGenerator::gen_extint_assignment(ExprPtr expr,
         declared_temps.insert(lhs_val);
     }
     emit(lhs_val + " = *" + lhs_ptr + ";");
+    const bool lhs_is_fixed = lhs_type &&
+                              lhs_type->kind == Type::Kind::Primitive &&
+                              (lhs_type->primitive == PrimitiveType::FixedInt ||
+                               lhs_type->primitive == PrimitiveType::FixedUInt);
+    const int64_t lhs_frac = lhs_is_fixed ? lhs_type->fractional_bits : 0;
+    if ((assign_op == "*=" || assign_op == "/=") && lhs_is_fixed && lhs_frac != 0) {
+        std::string op = (assign_op == "*=") ? "*" : "/";
+        auto fake = Expr::make_binary(op, expr ? expr->left : nullptr, expr ? expr->right : nullptr,
+                                      expr ? expr->location : SourceLocation());
+        fake->type = lhs_type;
+        std::string value = gen_extint_binary(fake, lhs_val, rhs);
+        emit("*" + lhs_ptr + " = " + value + ";");
+        return copy_result();
+    }
     if (assign_op == "+=") {
         emit("vx_ai_add(" + lhs_ptr + "->b, " + lhs_val + ".b, (" + rhs + ").b, sizeof(" + lhs_ptr + "->b), " + top_mask + ");");
         return copy_result();
