@@ -2153,12 +2153,13 @@ std::string CodeGenerator::gen_iteration(ExprPtr expr) {
 }
 
 std::string CodeGenerator::gen_repeat(ExprPtr expr) {
+    emit("while (1) {");
     std::string cond;
     {
         VoidCallGuard guard(*this, false);
         cond = gen_expr(expr->condition);
     }
-    emit("while (" + cond + ") {");
+    emit("  if (!(" + cond + ")) break;");
     std::string body_code;
     {
         VoidCallGuard guard(*this, true);
