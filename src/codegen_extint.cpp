@@ -382,19 +382,18 @@ static void vx_ai_from_double_u(uint8_t* out, size_t n, uint8_t top_mask, double
 std::string bytes_initializer_from_apint(bool target_signed, uint64_t bits, const APInt& value) {
     APInt wrapped = target_signed ? value.wrapped_signed(bits).wrapped_unsigned(bits)
                                   : value.wrapped_unsigned(bits);
-    boost::multiprecision::cpp_int raw = wrapped.raw();
     size_t n = static_cast<size_t>((bits + 7u) / 8u);
+    std::vector<uint8_t> bytes = wrapped.to_unsigned_le_bytes(n);
     std::ostringstream os;
     os << "{";
     for (size_t i = 0; i < n; ++i) {
-        unsigned byte = static_cast<unsigned>((raw & 0xFF).convert_to<unsigned>());
+        unsigned byte = bytes[i];
         if (i) os << ", ";
         os << "0x";
         os << std::hex << std::uppercase;
         if (byte < 16) os << "0";
         os << byte;
         os << std::dec << std::nouppercase;
-        raw >>= 8;
     }
     os << "}";
     return os.str();
