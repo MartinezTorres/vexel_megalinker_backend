@@ -90,6 +90,8 @@ static bool contains_named_struct_type(TypePtr type) {
         case Type::Kind::Named:
             return true;
         case Type::Kind::Array:
+        case Type::Kind::Vector:
+        case Type::Kind::Matrix:
             return contains_named_struct_type(type->element_type);
         case Type::Kind::TypeOf:
             if (type->typeof_expr && type->typeof_expr->type) {
