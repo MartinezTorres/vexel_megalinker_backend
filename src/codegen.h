@@ -232,6 +232,11 @@ private:
                                               const SourceLocation& loc);
     bool ctvalue_to_apint_value(const CTValue& v, APInt& out, bool& is_unsigned) const;
     std::string gen_extint_binary(ExprPtr expr, const std::string& left, const std::string& right);
+    std::string gen_fixed_native64_muldiv(ExprPtr expr,
+                                          TypePtr fixed_type,
+                                          const std::string& left,
+                                          const std::string& right,
+                                          const std::string& op);
     std::string gen_extint_unary(ExprPtr expr, const std::string& operand);
     std::string gen_extint_cast(ExprPtr expr, const std::string& operand);
     std::string gen_extint_assignment(ExprPtr expr,

@@ -42,6 +42,10 @@ cleanup() {
     "$SCRIPT_DIR/fixedmul72.vx" \
     "$SCRIPT_DIR/fixedmulfrac72.c" "$SCRIPT_DIR/fixedmulfrac72.h" "$SCRIPT_DIR/fixedmulfrac72__runtime.c" \
     "$SCRIPT_DIR/fixedmulfrac72.vx" \
+    "$SCRIPT_DIR/fixedmul64.c" "$SCRIPT_DIR/fixedmul64.h" "$SCRIPT_DIR/fixedmul64__runtime.c" \
+    "$SCRIPT_DIR/fixedmul64.vx" \
+    "$SCRIPT_DIR/fixedbitfrac72.c" "$SCRIPT_DIR/fixedbitfrac72.h" "$SCRIPT_DIR/fixedbitfrac72__runtime.c" \
+    "$SCRIPT_DIR/fixedbitfrac72.vx" \
     "$SCRIPT_DIR/fixedfloat.c" "$SCRIPT_DIR/fixedfloat.h" "$SCRIPT_DIR/fixedfloat__runtime.c" \
     "$SCRIPT_DIR/fixedfloat.vx" \
     "$SCRIPT_DIR/fixedcast72.c" "$SCRIPT_DIR/fixedcast72.h" "$SCRIPT_DIR/fixedcast72__runtime.c" \
@@ -485,6 +489,66 @@ if ! rg -q "vx_ai_mul\\(" fixedmulfrac72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_udivmod\\(" fixedmulfrac72__runtime.c megalinker/*.c || \
    ! rg -q "vx_ai_shr_u\\(" fixedmulfrac72__runtime.c megalinker/*.c; then
   echo "missing extint helper lowering for non-native fixed-point non-zero-fraction mul/div/mod"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedmul64.vx" <<'EOF'
+&^acc64(a:#u32.32, b:#u32.32, c:#u32.32) -> #u32.32 {
+  x:#u32.32 = a;
+  x = x * b;
+  x = x / c;
+  x = x % b;
+  x *= b;
+  x /= c;
+  x %= b;
+  x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedmul64 "$SCRIPT_DIR/fixedmul64.vx" \
+  >/tmp/megalinker_fixedmul64.out 2>/tmp/megalinker_fixedmul64.err; then
+  cat /tmp/megalinker_fixedmul64.out /tmp/megalinker_fixedmul64.err
+  echo "native 64-bit fixed-point mul/div/mod regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_acc64" fixedmul64.h; then
+  echo "missing native 64-bit fixed-point mul/div/mod wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_mul\\(" fixedmul64__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_udivmod\\(" fixedmul64__runtime.c megalinker/*.c; then
+  echo "missing helper lowering for native 64-bit fixed-point mul/div/mod"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/fixedbitfrac72.vx" <<'EOF'
+&^ops(a:#i40.8, b:#i40.8) -> #i40.8 {
+  x:#i40.8 = a;
+  x = x & b;
+  x = x | b;
+  x = x ^ b;
+  x = ~x;
+  x >>= b;
+  x <<= b;
+  x
+}
+&^main() -> #i32 { 0 }
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o fixedbitfrac72 "$SCRIPT_DIR/fixedbitfrac72.vx" \
+  >/tmp/megalinker_fixedbitfrac72.out 2>/tmp/megalinker_fixedbitfrac72.err; then
+  cat /tmp/megalinker_fixedbitfrac72.out /tmp/megalinker_fixedbitfrac72.err
+  echo "signed fractional fixed-point bitwise/shift regression case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_ops" fixedbitfrac72.h; then
+  echo "missing signed fractional fixed-point bitwise/shift wrapper declarations"
+  exit 1
+fi
+if ! rg -q "vx_ai_shr_s\\(" fixedbitfrac72__runtime.c megalinker/*.c || \
+   ! rg -q "vx_ai_not\\(" fixedbitfrac72__runtime.c megalinker/*.c; then
+  echo "missing helper lowering for signed fractional fixed-point bitwise/shift"
   exit 1
 fi
 

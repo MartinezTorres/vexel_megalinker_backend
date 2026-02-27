@@ -412,6 +412,10 @@ std::string CodeGenerator::gen_binary(ExprPtr expr) {
     }
     if (expr && expr->type && is_fixed_primitive_type_codegen(expr->type) &&
         (expr->op == "*" || expr->op == "/" || expr->op == "%")) {
+        int64_t fixed_bits = type_bits(expr->type->primitive, expr->type->integer_bits, expr->type->fractional_bits);
+        if (fixed_bits == 64) {
+            return gen_fixed_native64_muldiv(expr, expr->type, left, right, expr->op);
+        }
         std::string tmp = fresh_temp();
         std::string result_type = c_type_for_expr(expr);
         if (!declared_temps.count(tmp)) {
@@ -1857,11 +1861,18 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
             emit(ptr_tmp + " = &(" + lhs + ");");
         }
         std::string lhs_deref = std::string("*") + ptr_tmp;
+        int64_t fixed_bits = type_bits(lhs_type->primitive, lhs_type->integer_bits, lhs_type->fractional_bits);
+        if (fixed_bits == 64) {
+            std::string op = assign_op.substr(0, assign_op.size() - 1);
+            std::string value = gen_fixed_native64_muldiv(expr, lhs_type, lhs_deref, rhs, op);
+            emit(lhs_deref + " = " + value + ";");
+        } else {
         emit(lhs_deref + " = " +
              fixed_muldiv_raw_expr_codegen(lhs_type, lhs_type_str, lhs_deref, rhs,
                                            assign_op.substr(0, assign_op.size() - 1),
                                            expr->location) +
              ";");
+        }
         std::string result_tmp = fresh_temp();
         if (!declared_temps.count(result_tmp)) {
             emit(storage_prefix() + lhs_type_str + " " + result_tmp + ";");

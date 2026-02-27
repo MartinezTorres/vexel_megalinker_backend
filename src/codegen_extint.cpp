@@ -889,6 +889,224 @@ std::string CodeGenerator::gen_extint_binary(ExprPtr expr, const std::string& le
     throw CompileError("Unsupported binary operator '" + op + "' for arbitrary-width integer", expr->location);
 }
 
+std::string CodeGenerator::gen_fixed_native64_muldiv(ExprPtr expr,
+                                                     TypePtr fixed_type,
+                                                     const std::string& left,
+                                                     const std::string& right,
+                                                     const std::string& op) {
+    if (!fixed_type || fixed_type->kind != Type::Kind::Primitive ||
+        (fixed_type->primitive != PrimitiveType::FixedInt &&
+         fixed_type->primitive != PrimitiveType::FixedUInt)) {
+        throw CompileError("Internal error: expected fixed-point type for native64 fixed mul/div/mod lowering",
+                           expr ? expr->location : SourceLocation());
+    }
+    int64_t bits_i64 = type_bits(fixed_type->primitive, fixed_type->integer_bits, fixed_type->fractional_bits);
+    if (bits_i64 != 64) {
+        throw CompileError("Internal error: native64 fixed mul/div/mod helper requires 64-bit fixed-point type",
+                           expr ? expr->location : SourceLocation());
+    }
+
+    const bool fixed_signed = (fixed_type->primitive == PrimitiveType::FixedInt);
+    const int64_t fixed_frac = fixed_type->fractional_bits;
+    const uint64_t fixed_bits = 64;
+    const std::string fixed_top_mask = std::to_string(extint_top_mask(fixed_bits));
+    const std::string fixed_sign_mask = std::to_string(extint_sign_mask(fixed_bits));
+    const SourceLocation loc = expr ? expr->location : SourceLocation();
+
+    auto declare_ext_temp = [&](bool is_signed_tmp, uint64_t bits_tmp) {
+        ensure_extint_type(is_signed_tmp, bits_tmp);
+        std::string name = fresh_temp();
+        if (!declared_temps.count(name)) {
+            emit(storage_prefix() + extint_type_name(is_signed_tmp, bits_tmp) + " " + name + ";");
+            declared_temps.insert(name);
+        }
+        return name;
+    };
+    auto declare_bool_temp = [&]() {
+        std::string name = fresh_temp();
+        if (!declared_temps.count(name)) {
+            emit(storage_prefix() + std::string("_Bool ") + name + ";");
+            declared_temps.insert(name);
+        }
+        return name;
+    };
+    auto checked_add_u64 = [&](uint64_t a, uint64_t b, const std::string& context) -> uint64_t {
+        if (a > std::numeric_limits<uint64_t>::max() - b) {
+            throw CompileError("Fixed-point width overflow in " + context, loc);
+        }
+        return a + b;
+    };
+    auto abs_frac_u64 = [&](int64_t frac_bits, const std::string& context) -> uint64_t {
+        if (frac_bits == std::numeric_limits<int64_t>::min()) {
+            throw CompileError("Fixed-point fractional width overflow in " + context, loc);
+        }
+        return frac_bits < 0 ? static_cast<uint64_t>(-frac_bits) : static_cast<uint64_t>(frac_bits);
+    };
+
+    std::string lhs_raw = declare_ext_temp(fixed_signed, fixed_bits);
+    std::string rhs_raw = declare_ext_temp(fixed_signed, fixed_bits);
+    if (fixed_signed) {
+        emit("vx_ai_from_i64(" + lhs_raw + ".b, sizeof(" + lhs_raw + ".b), " + fixed_top_mask +
+             ", (int64_t)(" + left + "));");
+        emit("vx_ai_from_i64(" + rhs_raw + ".b, sizeof(" + rhs_raw + ".b), " + fixed_top_mask +
+             ", (int64_t)(" + right + "));");
+    } else {
+        emit("vx_ai_from_u64(" + lhs_raw + ".b, sizeof(" + lhs_raw + ".b), " + fixed_top_mask +
+             ", (uint64_t)(" + left + "));");
+        emit("vx_ai_from_u64(" + rhs_raw + ".b, sizeof(" + rhs_raw + ".b), " + fixed_top_mask +
+             ", (uint64_t)(" + right + "));");
+    }
+
+    std::string out_raw = declare_ext_temp(fixed_signed, fixed_bits);
+
+    if (op == "%") {
+        if (!fixed_signed) {
+            std::string q = declare_ext_temp(false, fixed_bits);
+            std::string rem = declare_ext_temp(false, fixed_bits);
+            emit("vx_ai_udivmod(" + q + ".b, " + rem + ".b, " + lhs_raw + ".b, " + rhs_raw + ".b, sizeof(" +
+                 q + ".b), " + fixed_top_mask + ");");
+            emit(out_raw + " = " + rem + ";");
+        } else {
+            std::string l_abs = declare_ext_temp(true, fixed_bits);
+            std::string r_abs = declare_ext_temp(true, fixed_bits);
+            std::string q = declare_ext_temp(true, fixed_bits);
+            std::string rem = declare_ext_temp(true, fixed_bits);
+            std::string l_neg = declare_bool_temp();
+            std::string r_neg = declare_bool_temp();
+            emit(l_neg + " = vx_ai_signbit(" + lhs_raw + ".b, sizeof(" + lhs_raw + ".b), " + fixed_sign_mask + ");");
+            emit(r_neg + " = vx_ai_signbit(" + rhs_raw + ".b, sizeof(" + rhs_raw + ".b), " + fixed_sign_mask + ");");
+            emit("if (" + l_neg + ") vx_ai_neg(" + l_abs + ".b, " + lhs_raw + ".b, sizeof(" + l_abs + ".b), " +
+                 fixed_top_mask + "); else " + l_abs + " = " + lhs_raw + ";");
+            emit("if (" + r_neg + ") vx_ai_neg(" + r_abs + ".b, " + rhs_raw + ".b, sizeof(" + r_abs + ".b), " +
+                 fixed_top_mask + "); else " + r_abs + " = " + rhs_raw + ";");
+            emit("vx_ai_udivmod(" + q + ".b, " + rem + ".b, " + l_abs + ".b, " + r_abs + ".b, sizeof(" +
+                 q + ".b), " + fixed_top_mask + ");");
+            emit(out_raw + " = " + rem + ";");
+            emit("if (" + l_neg + ") vx_ai_neg(" + out_raw + ".b, " + out_raw + ".b, sizeof(" + out_raw + ".b), " +
+                 fixed_top_mask + ");");
+        }
+    } else if (op == "*" || op == "/") {
+        uint64_t work_bits = 0;
+        if (op == "*") {
+            work_bits = checked_add_u64(fixed_bits, fixed_bits, "fixed-point multiplication");
+            if (fixed_frac < 0) {
+                work_bits = checked_add_u64(work_bits, abs_frac_u64(fixed_frac, "fixed-point multiplication"),
+                                            "fixed-point multiplication");
+            }
+        } else {
+            work_bits = checked_add_u64(fixed_bits, fixed_bits, "fixed-point division");
+            work_bits = checked_add_u64(work_bits, abs_frac_u64(fixed_frac, "fixed-point division"),
+                                        "fixed-point division");
+        }
+        if (work_bits <= fixed_bits) {
+            work_bits = checked_add_u64(fixed_bits, 1, "fixed-point widening");
+        }
+        ensure_extint_type(fixed_signed, work_bits);
+        const std::string work_top_mask = std::to_string(extint_top_mask(work_bits));
+        const std::string work_sign_mask = std::to_string(extint_sign_mask(work_bits));
+
+        std::string lhs_wide = declare_ext_temp(fixed_signed, work_bits);
+        std::string rhs_wide = declare_ext_temp(fixed_signed, work_bits);
+        emit("vx_ai_cast(" + lhs_wide + ".b, sizeof(" + lhs_wide + ".b), " + work_top_mask +
+             ", " + lhs_raw + ".b, sizeof(" + lhs_raw + ".b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + fixed_sign_mask + ");");
+        emit("vx_ai_cast(" + rhs_wide + ".b, sizeof(" + rhs_wide + ".b), " + work_top_mask +
+             ", " + rhs_raw + ".b, sizeof(" + rhs_raw + ".b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + fixed_sign_mask + ");");
+
+        std::string scaled = declare_ext_temp(fixed_signed, work_bits);
+        if (op == "*") {
+            std::string prod = declare_ext_temp(fixed_signed, work_bits);
+            emit("vx_ai_mul(" + prod + ".b, " + lhs_wide + ".b, " + rhs_wide + ".b, sizeof(" + prod + ".b), " +
+                 work_top_mask + ");");
+            if (fixed_frac > 0) {
+                uint64_t shift = static_cast<uint64_t>(fixed_frac);
+                if (fixed_signed) {
+                    std::string neg = declare_bool_temp();
+                    std::string abs = declare_ext_temp(true, work_bits);
+                    std::string shr = declare_ext_temp(true, work_bits);
+                    emit(neg + " = vx_ai_signbit(" + prod + ".b, sizeof(" + prod + ".b), " + work_sign_mask + ");");
+                    emit("if (" + neg + ") vx_ai_neg(" + abs + ".b, " + prod + ".b, sizeof(" + abs + ".b), " +
+                         work_top_mask + "); else " + abs + " = " + prod + ";");
+                    emit("vx_ai_shr_u(" + shr + ".b, " + abs + ".b, sizeof(" + shr + ".b), " + std::to_string(shift) +
+                         ", " + work_top_mask + ");");
+                    emit("if (" + neg + ") vx_ai_neg(" + scaled + ".b, " + shr + ".b, sizeof(" + scaled + ".b), " +
+                         work_top_mask + "); else " + scaled + " = " + shr + ";");
+                } else {
+                    emit("vx_ai_shr_u(" + scaled + ".b, " + prod + ".b, sizeof(" + scaled + ".b), " +
+                         std::to_string(shift) + ", " + work_top_mask + ");");
+                }
+            } else if (fixed_frac < 0) {
+                emit("vx_ai_shl(" + scaled + ".b, " + prod + ".b, sizeof(" + scaled + ".b), " +
+                     std::to_string(static_cast<uint64_t>(-fixed_frac)) + ", " + work_top_mask + ");");
+            } else {
+                emit(scaled + " = " + prod + ";");
+            }
+        } else {
+            std::string num = declare_ext_temp(fixed_signed, work_bits);
+            std::string den = declare_ext_temp(fixed_signed, work_bits);
+            emit(num + " = " + lhs_wide + ";");
+            emit(den + " = " + rhs_wide + ";");
+            if (fixed_frac > 0) {
+                std::string num_shifted = declare_ext_temp(fixed_signed, work_bits);
+                emit("vx_ai_shl(" + num_shifted + ".b, " + num + ".b, sizeof(" + num + ".b), " +
+                     std::to_string(static_cast<uint64_t>(fixed_frac)) + ", " + work_top_mask + ");");
+                emit(num + " = " + num_shifted + ";");
+            } else if (fixed_frac < 0) {
+                std::string den_shifted = declare_ext_temp(fixed_signed, work_bits);
+                emit("vx_ai_shl(" + den_shifted + ".b, " + den + ".b, sizeof(" + den + ".b), " +
+                     std::to_string(static_cast<uint64_t>(-fixed_frac)) + ", " + work_top_mask + ");");
+                emit(den + " = " + den_shifted + ";");
+            }
+            if (!fixed_signed) {
+                std::string rem = declare_ext_temp(false, work_bits);
+                emit("vx_ai_udivmod(" + scaled + ".b, " + rem + ".b, " + num + ".b, " + den + ".b, sizeof(" +
+                     scaled + ".b), " + work_top_mask + ");");
+            } else {
+                std::string q = declare_ext_temp(true, work_bits);
+                std::string rem = declare_ext_temp(true, work_bits);
+                std::string num_abs = declare_ext_temp(true, work_bits);
+                std::string den_abs = declare_ext_temp(true, work_bits);
+                std::string num_neg = declare_bool_temp();
+                std::string den_neg = declare_bool_temp();
+                emit(num_neg + " = vx_ai_signbit(" + num + ".b, sizeof(" + num + ".b), " + work_sign_mask + ");");
+                emit(den_neg + " = vx_ai_signbit(" + den + ".b, sizeof(" + den + ".b), " + work_sign_mask + ");");
+                emit("if (" + num_neg + ") vx_ai_neg(" + num_abs + ".b, " + num + ".b, sizeof(" + num_abs + ".b), " +
+                     work_top_mask + "); else " + num_abs + " = " + num + ";");
+                emit("if (" + den_neg + ") vx_ai_neg(" + den_abs + ".b, " + den + ".b, sizeof(" + den_abs + ".b), " +
+                     work_top_mask + "); else " + den_abs + " = " + den + ";");
+                emit("vx_ai_udivmod(" + q + ".b, " + rem + ".b, " + num_abs + ".b, " + den_abs + ".b, sizeof(" +
+                     q + ".b), " + work_top_mask + ");");
+                emit(scaled + " = " + q + ";");
+                emit("if (" + num_neg + " != " + den_neg + ") vx_ai_neg(" + scaled + ".b, " + scaled +
+                     ".b, sizeof(" + scaled + ".b), " + work_top_mask + ");");
+            }
+        }
+
+        emit("vx_ai_cast(" + out_raw + ".b, sizeof(" + out_raw + ".b), " + fixed_top_mask +
+             ", " + scaled + ".b, sizeof(" + scaled + ".b), " +
+             std::string(fixed_signed ? "1" : "0") + ", " + work_sign_mask + ");");
+    } else {
+        throw CompileError("Internal error: unsupported fixed native64 mul/div/mod operator '" + op + "'",
+                           loc);
+    }
+
+    std::string out_native = fresh_temp();
+    std::string out_native_type = gen_type(fixed_type);
+    if (!declared_temps.count(out_native)) {
+        emit(storage_prefix() + out_native_type + " " + out_native + ";");
+        declared_temps.insert(out_native);
+    }
+    if (fixed_signed) {
+        emit(out_native + " = (" + out_native_type + ")vx_ai_to_i64_trunc(" + out_raw + ".b, sizeof(" + out_raw +
+             ".b), " + fixed_sign_mask + ");");
+    } else {
+        emit(out_native + " = (" + out_native_type + ")vx_ai_to_u64_trunc(" + out_raw + ".b, sizeof(" + out_raw +
+             ".b));");
+    }
+    return out_native;
+}
+
 std::string CodeGenerator::gen_extint_cast(ExprPtr expr, const std::string& operand) {
     if (!expr || !expr->target_type || !expr->operand || !expr->operand->type) {
         throw CompileError("Internal error: invalid extint cast emission", expr ? expr->location : SourceLocation());
