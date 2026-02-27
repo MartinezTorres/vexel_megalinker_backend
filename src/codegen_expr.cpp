@@ -704,7 +704,8 @@ std::string CodeGenerator::gen_inline_call(ExprPtr expr,
 
 std::string CodeGenerator::gen_call(ExprPtr expr) {
     // Check if this is a type constructor call
-    if (expr->operand && expr->operand->kind == Expr::Kind::Identifier &&
+    if (expr->is_constructor_call &&
+        expr->operand && expr->operand->kind == Expr::Kind::Identifier &&
         expr->type && expr->type->kind == Type::Kind::Named) {
 
         Symbol* sym = binding_for(expr->operand);

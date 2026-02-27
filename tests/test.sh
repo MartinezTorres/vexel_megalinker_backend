@@ -187,7 +187,7 @@ cat > "$SCRIPT_DIR/bad_struct_import.vx" <<'EOF'
 #Vec(x:#i32, y:#i32);
 &!scale(v:#Vec, k:#i32) -> #Vec;
 &^main() -> #i32 {
-  p:#Vec = Vec(3, 4);
+  p:#Vec = #Vec(3, 4);
   q:#Vec = scale(p, 2);
   q.x + q.y
 }
@@ -206,7 +206,7 @@ fi
 
 cat > "$SCRIPT_DIR/struct_export_global.vx" <<'EOF'
 #Pixel(r:#u8, g:#u8, b:#u8);
-^palette:#Pixel[2] = [Pixel(1, 2, 3), Pixel(4, 5, 6)];
+^palette:#Pixel[2] = [#Pixel(1, 2, 3), #Pixel(4, 5, 6)];
 &^main() -> #i32 { 0 }
 EOF
 
@@ -677,13 +677,13 @@ fi
 
 cat > "$SCRIPT_DIR/arraytmp.vx" <<'EOF'
 #Box(v:#i32);
-&(lhs)#Box::.+(rhs:#Box) -> #Box { Box(lhs.v + rhs.v) }
+&(lhs)#Box::.+(rhs:#Box) -> #Box { #Box(lhs.v + rhs.v) }
 &!seed() -> #i32;
 &work() -> #i32 {
   base:#i32 = seed();
   xs:#i32[2] = [1, 2];
-  off:#Box = Box(10);
-  boxes:#Box[2] = [Box(base), Box(base + 1)];
+  off:#Box = #Box(10);
+  boxes:#Box[2] = [#Box(base), #Box(base + 1)];
   xs .+= base;
   boxes .+= off;
   xs[0] + boxes[1].v
@@ -744,7 +744,7 @@ fi
 cat > "$SCRIPT_DIR/wrap_struct.vx" <<'EOF'
 #Vec(x:#i32, y:#i32);
 &^makev() -> #Vec {
-  Vec(1, 2)
+  #Vec(1, 2)
 }
 &^main() -> #i32 { 0 }
 EOF

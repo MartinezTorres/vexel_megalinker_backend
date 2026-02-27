@@ -1805,6 +1805,7 @@ bool CodeGenerator::can_emit_static_initializer_expr(ExprPtr expr) const {
             }
             return true;
         case Expr::Kind::Call: {
+            if (!expr->is_constructor_call) return false;
             if (!expr->operand || expr->operand->kind != Expr::Kind::Identifier) return false;
             bool is_ctor = false;
             if (type_map.find(expr->operand->name) != type_map.end()) {
