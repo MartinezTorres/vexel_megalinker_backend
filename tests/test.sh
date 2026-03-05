@@ -7,6 +7,12 @@ if [[ -z "$ROOT" ]]; then
   ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 fi
 
+BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
+if [[ "$BUILD_DIR" != /* ]]; then
+  BUILD_DIR="$ROOT/$BUILD_DIR"
+fi
+CLI="$BUILD_DIR/vexel"
+
 cleanup() {
   rm -f "$SCRIPT_DIR/out.c" "$SCRIPT_DIR/out.h" "$SCRIPT_DIR/out__runtime.c" \
     "$SCRIPT_DIR/out.analysis.txt" \
@@ -67,7 +73,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! VEXEL_ROOT_DIR="$ROOT" make -s -C "$ROOT" driver >/tmp/driver_build.out 2>/tmp/driver_build.err; then
+if ! VEXEL_ROOT_DIR="$ROOT" BUILD_DIR="$BUILD_DIR" make -s -C "$ROOT" driver >/tmp/driver_build.out 2>/tmp/driver_build.err; then
   cat /tmp/driver_build.out /tmp/driver_build.err
   exit 1
 fi
@@ -93,10 +99,24 @@ if ! rg -q 'megalinker_semantics::is_pointer_like_type\(' "$ROOT/backends/ext/me
   echo "megalinker backend must use shared local semantics helper for pointer-like checks"
   exit 1
 fi
+if ! rg -q 'static std::string trampoline_name\(const StmtPtr& decl,' \
+  "$ROOT/backends/ext/megalinker/src/megalinker_backend.cpp"; then
+  echo "trampoline helper signature must include decl parameter"
+  exit 1
+fi
+if ! rg -q 'int scope_id' \
+  "$ROOT/backends/ext/megalinker/src/megalinker_backend.cpp"; then
+  echo "trampoline names must include scope-qualified disambiguation"
+  exit 1
+fi
+if rg -q 'func_name \+= instance_suffix\(sym\);' "$ROOT/backends/ext/megalinker/src/codegen_expr.cpp"; then
+  echo "resolved mangled call targets must not append instance suffix unconditionally"
+  exit 1
+fi
 
 pushd "$SCRIPT_DIR" >/dev/null
 
-if ! "$ROOT/build/vexel" -b megalinker --backend-opt caller_limit=1 -o out input.vx \
+if ! "$CLI" -b megalinker --backend-opt caller_limit=1 -o out input.vx \
   >/tmp/megalinker_compile.out 2>/tmp/megalinker_compile.err; then
   cat /tmp/megalinker_compile.out /tmp/megalinker_compile.err
   exit 1
@@ -183,6 +203,14 @@ if rg -q "VX_REENTRANT|VX_NON_REENTRANT|VX_ENTRYPOINT|VX_INLINE|VX_NOINLINE|VX_P
   exit 1
 fi
 
+if ! gcc -std=c11 -Wno-attributes -D__nonbanked= -D'__sdcccall(x)=' \
+  -fsyntax-only out__runtime.c megalinker/*.c -I"$SCRIPT_DIR" \
+  >/tmp/megalinker_syntax.out 2>/tmp/megalinker_syntax.err; then
+  cat /tmp/megalinker_syntax.out /tmp/megalinker_syntax.err
+  echo "generated megalinker C must be syntax-valid"
+  exit 1
+fi
+
 cat > "$SCRIPT_DIR/bad_struct_import.vx" <<'EOF'
 #Vec(x:#i32, y:#i32);
 &!scale(v:#Vec, k:#i32) -> #Vec;
@@ -193,7 +221,7 @@ cat > "$SCRIPT_DIR/bad_struct_import.vx" <<'EOF'
 }
 EOF
 
-if "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_struct_import.vx" \
+if "$CLI" -b megalinker -o bad "$SCRIPT_DIR/bad_struct_import.vx" \
   >/tmp/megalinker_bad.out 2>/tmp/megalinker_bad.err; then
   echo "named-struct external ABI should be rejected"
   exit 1
@@ -210,7 +238,7 @@ cat > "$SCRIPT_DIR/struct_export_global.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o struct_global "$SCRIPT_DIR/struct_export_global.vx" \
+if ! "$CLI" -b megalinker -o struct_global "$SCRIPT_DIR/struct_export_global.vx" \
   >/tmp/megalinker_struct_global.out 2>/tmp/megalinker_struct_global.err; then
   cat /tmp/megalinker_struct_global.out /tmp/megalinker_struct_global.err
   echo "exported named-struct globals should compile"
@@ -231,7 +259,7 @@ cat > "$SCRIPT_DIR/fixedabi.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedabi "$SCRIPT_DIR/fixedabi.vx" \
+if ! "$CLI" -b megalinker -o fixedabi "$SCRIPT_DIR/fixedabi.vx" \
   >/tmp/megalinker_fixedabi.out 2>/tmp/megalinker_fixedabi.err; then
   cat /tmp/megalinker_fixedabi.out /tmp/megalinker_fixedabi.err
   echo "fixed-point ABI storage type regression case failed to compile"
@@ -256,7 +284,7 @@ cat > "$SCRIPT_DIR/fixedcast.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedcast "$SCRIPT_DIR/fixedcast.vx" \
+if ! "$CLI" -b megalinker -o fixedcast "$SCRIPT_DIR/fixedcast.vx" \
   >/tmp/megalinker_fixedcast.out 2>/tmp/megalinker_fixedcast.err; then
   cat /tmp/megalinker_fixedcast.out /tmp/megalinker_fixedcast.err
   echo "fixed-point cast regression case failed to compile"
@@ -285,7 +313,7 @@ cat > "$SCRIPT_DIR/fixedops.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedops "$SCRIPT_DIR/fixedops.vx" \
+if ! "$CLI" -b megalinker -o fixedops "$SCRIPT_DIR/fixedops.vx" \
   >/tmp/megalinker_fixedops.out 2>/tmp/megalinker_fixedops.err; then
   cat /tmp/megalinker_fixedops.out /tmp/megalinker_fixedops.err
   echo "fixed-point mul/div/mod regression case failed to compile"
@@ -309,7 +337,7 @@ cat > "$SCRIPT_DIR/fixedbit.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedbit "$SCRIPT_DIR/fixedbit.vx" \
+if ! "$CLI" -b megalinker -o fixedbit "$SCRIPT_DIR/fixedbit.vx" \
   >/tmp/megalinker_fixedbit.out 2>/tmp/megalinker_fixedbit.err; then
   cat /tmp/megalinker_fixedbit.out /tmp/megalinker_fixedbit.err
   echo "fixed-point zero-fraction bitwise/shift regression case failed to compile"
@@ -334,7 +362,7 @@ cat > "$SCRIPT_DIR/fixedbit72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedbit72 "$SCRIPT_DIR/fixedbit72.vx" \
+if ! "$CLI" -b megalinker -o fixedbit72 "$SCRIPT_DIR/fixedbit72.vx" \
   >/tmp/megalinker_fixedbit72.out 2>/tmp/megalinker_fixedbit72.err; then
   cat /tmp/megalinker_fixedbit72.out /tmp/megalinker_fixedbit72.err
   echo "non-native fixed-point zero-fraction bitwise/shift regression case failed to compile"
@@ -369,7 +397,7 @@ cat > "$SCRIPT_DIR/fixedarith72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedarith72 "$SCRIPT_DIR/fixedarith72.vx" \
+if ! "$CLI" -b megalinker -o fixedarith72 "$SCRIPT_DIR/fixedarith72.vx" \
   >/tmp/megalinker_fixedarith72.out 2>/tmp/megalinker_fixedarith72.err; then
   cat /tmp/megalinker_fixedarith72.out /tmp/megalinker_fixedarith72.err
   echo "non-native fixed-point zero-fraction arithmetic/comparison regression case failed to compile"
@@ -403,7 +431,7 @@ cat > "$SCRIPT_DIR/fixedarithfrac72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedarithfrac72 "$SCRIPT_DIR/fixedarithfrac72.vx" \
+if ! "$CLI" -b megalinker -o fixedarithfrac72 "$SCRIPT_DIR/fixedarithfrac72.vx" \
   >/tmp/megalinker_fixedarithfrac72.out 2>/tmp/megalinker_fixedarithfrac72.err; then
   cat /tmp/megalinker_fixedarithfrac72.out /tmp/megalinker_fixedarithfrac72.err
   echo "non-native fixed-point non-zero-fraction arithmetic/comparison regression case failed to compile"
@@ -445,7 +473,7 @@ cat > "$SCRIPT_DIR/fixedmul72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedmul72 "$SCRIPT_DIR/fixedmul72.vx" \
+if ! "$CLI" -b megalinker -o fixedmul72 "$SCRIPT_DIR/fixedmul72.vx" \
   >/tmp/megalinker_fixedmul72.out 2>/tmp/megalinker_fixedmul72.err; then
   cat /tmp/megalinker_fixedmul72.out /tmp/megalinker_fixedmul72.err
   echo "non-native fixed-point zero-fraction mul/div/mod regression case failed to compile"
@@ -475,7 +503,7 @@ cat > "$SCRIPT_DIR/fixedmulfrac72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedmulfrac72 "$SCRIPT_DIR/fixedmulfrac72.vx" \
+if ! "$CLI" -b megalinker -o fixedmulfrac72 "$SCRIPT_DIR/fixedmulfrac72.vx" \
   >/tmp/megalinker_fixedmulfrac72.out 2>/tmp/megalinker_fixedmulfrac72.err; then
   cat /tmp/megalinker_fixedmulfrac72.out /tmp/megalinker_fixedmulfrac72.err
   echo "non-native fixed-point non-zero-fraction mul/div/mod regression case failed to compile"
@@ -506,7 +534,7 @@ cat > "$SCRIPT_DIR/fixedmul64.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedmul64 "$SCRIPT_DIR/fixedmul64.vx" \
+if ! "$CLI" -b megalinker -o fixedmul64 "$SCRIPT_DIR/fixedmul64.vx" \
   >/tmp/megalinker_fixedmul64.out 2>/tmp/megalinker_fixedmul64.err; then
   cat /tmp/megalinker_fixedmul64.out /tmp/megalinker_fixedmul64.err
   echo "native 64-bit fixed-point mul/div/mod regression case failed to compile"
@@ -536,7 +564,7 @@ cat > "$SCRIPT_DIR/fixedbitfrac72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedbitfrac72 "$SCRIPT_DIR/fixedbitfrac72.vx" \
+if ! "$CLI" -b megalinker -o fixedbitfrac72 "$SCRIPT_DIR/fixedbitfrac72.vx" \
   >/tmp/megalinker_fixedbitfrac72.out 2>/tmp/megalinker_fixedbitfrac72.err; then
   cat /tmp/megalinker_fixedbitfrac72.out /tmp/megalinker_fixedbitfrac72.err
   echo "signed fractional fixed-point bitwise/shift regression case failed to compile"
@@ -558,7 +586,7 @@ cat > "$SCRIPT_DIR/fixedfloat.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedfloat "$SCRIPT_DIR/fixedfloat.vx" \
+if ! "$CLI" -b megalinker -o fixedfloat "$SCRIPT_DIR/fixedfloat.vx" \
   >/tmp/megalinker_fixedfloat.out 2>/tmp/megalinker_fixedfloat.err; then
   cat /tmp/megalinker_fixedfloat.out /tmp/megalinker_fixedfloat.err
   echo "fixed-point float cast regression case failed to compile"
@@ -581,7 +609,7 @@ cat > "$SCRIPT_DIR/fixedcast72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedcast72 "$SCRIPT_DIR/fixedcast72.vx" \
+if ! "$CLI" -b megalinker -o fixedcast72 "$SCRIPT_DIR/fixedcast72.vx" \
   >/tmp/megalinker_fixedcast72.out 2>/tmp/megalinker_fixedcast72.err; then
   cat /tmp/megalinker_fixedcast72.out /tmp/megalinker_fixedcast72.err
   echo "non-native fixed-point zero-fraction cast regression case failed to compile"
@@ -611,7 +639,7 @@ cat > "$SCRIPT_DIR/fixedcastfrac72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedcastfrac72 "$SCRIPT_DIR/fixedcastfrac72.vx" \
+if ! "$CLI" -b megalinker -o fixedcastfrac72 "$SCRIPT_DIR/fixedcastfrac72.vx" \
   >/tmp/megalinker_fixedcastfrac72.out 2>/tmp/megalinker_fixedcastfrac72.err; then
   cat /tmp/megalinker_fixedcastfrac72.out /tmp/megalinker_fixedcastfrac72.err
   echo "non-native fixed-point non-zero-fraction cast regression case failed to compile"
@@ -643,7 +671,7 @@ cat > "$SCRIPT_DIR/boolpack72.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o boolpack72 "$SCRIPT_DIR/boolpack72.vx" \
+if ! "$CLI" -b megalinker -o boolpack72 "$SCRIPT_DIR/boolpack72.vx" \
   >/tmp/megalinker_boolpack72.out 2>/tmp/megalinker_boolpack72.err; then
   cat /tmp/megalinker_boolpack72.out /tmp/megalinker_boolpack72.err
   echo "bool-array to arbitrary-width integer cast regression case failed to compile"
@@ -664,7 +692,7 @@ cat > "$SCRIPT_DIR/fixedden.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o fixedden "$SCRIPT_DIR/fixedden.vx" \
+if ! "$CLI" -b megalinker -o fixedden "$SCRIPT_DIR/fixedden.vx" \
   >/tmp/megalinker_fixedden.out 2>/tmp/megalinker_fixedden.err; then
   cat /tmp/megalinker_fixedden.out /tmp/megalinker_fixedden.err
   echo "fixed-point large-negative-frac division regression case failed to compile"
@@ -693,7 +721,7 @@ cat > "$SCRIPT_DIR/arraytmp.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o arraytmp "$SCRIPT_DIR/arraytmp.vx" \
+if ! "$CLI" -b megalinker -o arraytmp "$SCRIPT_DIR/arraytmp.vx" \
   >/tmp/megalinker_arraytmp.out 2>/tmp/megalinker_arraytmp.err; then
   cat /tmp/megalinker_arraytmp.out /tmp/megalinker_arraytmp.err
   echo "runtime array-literal temporary regression case failed to compile"
@@ -722,7 +750,7 @@ G:#i32;
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker --backend-opt caller_limit=1 -o wrap "$SCRIPT_DIR/wrap_void.vx" \
+if ! "$CLI" -b megalinker --backend-opt caller_limit=1 -o wrap "$SCRIPT_DIR/wrap_void.vx" \
   >/tmp/megalinker_wrap_void.out 2>/tmp/megalinker_wrap_void.err; then
   cat /tmp/megalinker_wrap_void.out /tmp/megalinker_wrap_void.err
   echo "void trampoline case failed to compile"
@@ -749,7 +777,7 @@ cat > "$SCRIPT_DIR/wrap_struct.vx" <<'EOF'
 &^main() -> #i32 { 0 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o wrap "$SCRIPT_DIR/wrap_struct.vx" \
+if ! "$CLI" -b megalinker -o wrap "$SCRIPT_DIR/wrap_struct.vx" \
   >/tmp/megalinker_wrap_struct.out 2>/tmp/megalinker_wrap_struct.err; then
   cat /tmp/megalinker_wrap_struct.out /tmp/megalinker_wrap_struct.err
   echo "struct return wrapper case failed to compile"
@@ -778,7 +806,7 @@ cat > "$SCRIPT_DIR/sdcccall_ok.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_ok.vx" \
+if ! "$CLI" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_ok.vx" \
   >/tmp/megalinker_sdcccall_ok.out 2>/tmp/megalinker_sdcccall_ok.err; then
   cat /tmp/megalinker_sdcccall_ok.out /tmp/megalinker_sdcccall_ok.err
   echo "sdcccall ABI annotation case failed to compile"
@@ -808,7 +836,7 @@ cat > "$SCRIPT_DIR/sdcccall_bad_scope.vx" <<'EOF'
 }
 EOF
 
-if "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_scope.vx" \
+if "$CLI" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_scope.vx" \
   >/tmp/megalinker_sdcccall_bad_scope.out 2>/tmp/megalinker_sdcccall_bad_scope.err; then
   echo "sdcccall on non-ABI function should be rejected"
   exit 1
@@ -826,7 +854,7 @@ cat > "$SCRIPT_DIR/sdcccall_bad_arg.vx" <<'EOF'
 }
 EOF
 
-if "$ROOT/build/vexel" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
+if "$CLI" -b megalinker -o sdcc "$SCRIPT_DIR/sdcccall_bad_arg.vx" \
   >/tmp/megalinker_sdcccall_bad_arg.out 2>/tmp/megalinker_sdcccall_bad_arg.err; then
   echo "sdcccall with invalid argument should be rejected"
   exit 1
@@ -837,7 +865,7 @@ if ! rg -q "\\[\\[sdcccall\\]\\] argument must be 0 or 1" /tmp/megalinker_sdccca
   exit 1
 fi
 
-if ! "$ROOT/build/vexel" -b megalinker --internal-prefix mltest_ -o pref input.vx \
+if ! "$CLI" -b megalinker --internal-prefix mltest_ -o pref input.vx \
   >/tmp/megalinker_compile_pref.out 2>/tmp/megalinker_compile_pref.err; then
   cat /tmp/megalinker_compile_pref.out /tmp/megalinker_compile_pref.err
   exit 1
@@ -864,7 +892,7 @@ G:#i32;
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o inl "$SCRIPT_DIR/inline_default.vx" \
+if ! "$CLI" -b megalinker -o inl "$SCRIPT_DIR/inline_default.vx" \
   >/tmp/megalinker_inline_default.out 2>/tmp/megalinker_inline_default.err; then
   cat /tmp/megalinker_inline_default.out /tmp/megalinker_inline_default.err
   echo "inline-default case failed to compile"
@@ -889,7 +917,7 @@ G:#i32;
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o noinl "$SCRIPT_DIR/inline_noinline.vx" \
+if ! "$CLI" -b megalinker -o noinl "$SCRIPT_DIR/inline_noinline.vx" \
   >/tmp/megalinker_inline_noinline.out 2>/tmp/megalinker_inline_noinline.err; then
   cat /tmp/megalinker_inline_noinline.out /tmp/megalinker_inline_noinline.err
   echo "noinline case failed to compile"
@@ -917,7 +945,7 @@ cat > "$SCRIPT_DIR/linkage.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o linkage "$SCRIPT_DIR/linkage.vx" \
+if ! "$CLI" -b megalinker -o linkage "$SCRIPT_DIR/linkage.vx" \
   >/tmp/megalinker_linkage.out 2>/tmp/megalinker_linkage.err; then
   cat /tmp/megalinker_linkage.out /tmp/megalinker_linkage.err
   echo "backend-bound linkage case failed to compile"
@@ -946,7 +974,7 @@ cat > "$SCRIPT_DIR/bundled_std_math_classify.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o mathclass "$SCRIPT_DIR/bundled_std_math_classify.vx" \
+if ! "$CLI" -b megalinker -o mathclass "$SCRIPT_DIR/bundled_std_math_classify.vx" \
   >/tmp/megalinker_math_class.out 2>/tmp/megalinker_math_class.err; then
   cat /tmp/megalinker_math_class.out /tmp/megalinker_math_class.err
   echo "bundled std::math classification case failed to compile"
@@ -983,7 +1011,7 @@ cat > "$SCRIPT_DIR/local_std_math_override.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o mathovr "$SCRIPT_DIR/local_std_math_override.vx" \
+if ! "$CLI" -b megalinker -o mathovr "$SCRIPT_DIR/local_std_math_override.vx" \
   >/tmp/megalinker_math_override.out 2>/tmp/megalinker_math_override.err; then
   cat /tmp/megalinker_math_override.out /tmp/megalinker_math_override.err
   echo "local std::math override case failed to compile"
@@ -1009,7 +1037,7 @@ cat > "$SCRIPT_DIR/bundled_std_bits_reinterpret.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o bitsrt "$SCRIPT_DIR/bundled_std_bits_reinterpret.vx" \
+if ! "$CLI" -b megalinker -o bitsrt "$SCRIPT_DIR/bundled_std_bits_reinterpret.vx" \
   >/tmp/megalinker_bits_reinterpret.out 2>/tmp/megalinker_bits_reinterpret.err; then
   cat /tmp/megalinker_bits_reinterpret.out /tmp/megalinker_bits_reinterpret.err
   echo "bundled std::bits reinterpret case failed to compile"
@@ -1037,7 +1065,7 @@ cat > "$SCRIPT_DIR/local_std_bits_override.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o bitsovr "$SCRIPT_DIR/local_std_bits_override.vx" \
+if ! "$CLI" -b megalinker -o bitsovr "$SCRIPT_DIR/local_std_bits_override.vx" \
   >/tmp/megalinker_bits_override.out 2>/tmp/megalinker_bits_override.err; then
   cat /tmp/megalinker_bits_override.out /tmp/megalinker_bits_override.err
   echo "local std::bits override case failed to compile"
@@ -1057,7 +1085,7 @@ cat > "$SCRIPT_DIR/bad_width.vx" <<'EOF'
 }
 EOF
 
-if ! "$ROOT/build/vexel" -b megalinker -o bad "$SCRIPT_DIR/bad_width.vx" \
+if ! "$CLI" -b megalinker -o bad "$SCRIPT_DIR/bad_width.vx" \
   >/tmp/megalinker_bad_width.out 2>/tmp/megalinker_bad_width.err; then
   cat /tmp/megalinker_bad_width.out /tmp/megalinker_bad_width.err
   echo "arbitrary-width integer lowering should compile in megalinker backend"
@@ -1071,7 +1099,7 @@ if ! rg -q "vx_ai_shl|vx_ai_udivmod|vx_ai_add" bad__runtime.c megalinker/*.c; th
   echo "missing arbitrary-width helper usage in megalinker output"
   exit 1
 fi
-if ! "$ROOT/build/vexel" -b megalinker --backend-opt internal_prefix=mltest_ -o bad "$SCRIPT_DIR/bad_width.vx" \
+if ! "$CLI" -b megalinker --backend-opt internal_prefix=mltest_ -o bad "$SCRIPT_DIR/bad_width.vx" \
   >/tmp/megalinker_bad_width_pref.out 2>/tmp/megalinker_bad_width_pref.err; then
   cat /tmp/megalinker_bad_width_pref.out /tmp/megalinker_bad_width_pref.err
   echo "prefixed arbitrary-width lowering should compile"

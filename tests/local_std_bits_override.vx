@@ -1,0 +1,6 @@
+::std::bits;
+&!seedf() -> #f32;
+&^main() -> #i32 {
+  x:#u32 = std::bits::f32_as_u32(seedf());
+  (#i32)x
+}

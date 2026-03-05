@@ -93,6 +93,7 @@ class CodeGenerator {
     std::unordered_set<std::string> live_temps;
     std::unordered_set<std::string> declared_temps;
     std::unordered_map<std::string, std::string> type_map;
+    std::unordered_map<std::string, StmtPtr> type_decl_map;
     const AnalyzedProgram* analyzed_program = nullptr;
     std::stack<std::ostringstream*> output_stack;
     std::unordered_map<std::string, std::string> comparator_cache;
@@ -185,7 +186,6 @@ private:
     std::string gen_iteration(ExprPtr expr);
     std::string gen_repeat(ExprPtr expr);
 
-    bool is_compile_time_init(StmtPtr stmt) const;
     std::string mutability_prefix(StmtPtr stmt) const;
     std::string ref_variant_key(const ExprPtr& call, size_t ref_count) const;
     std::vector<std::string> ref_variant_keys_for(StmtPtr stmt) const;
@@ -285,7 +285,6 @@ private:
     std::string ensure_comparator(TypePtr type);
     int64_t resolve_array_length(TypePtr type, const SourceLocation& loc);
     void emit_return_stmt(const std::string& expr);
-    void append_return_prefix(std::ostringstream& out) const;
     void validate_codegen_invariants(const Module& mod);
     void validate_codegen_invariants(StmtPtr func);
     void validate_codegen_invariants_impl(const std::vector<StmtPtr>& stmts, bool use_facts, bool top_level);

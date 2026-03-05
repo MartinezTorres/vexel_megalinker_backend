@@ -1,0 +1,8 @@
+::std::bits;
+&!seedf() -> #f32;
+&!seedd() -> #f64;
+&^main() -> #i32 {
+  a:#u32 = std::bits::f32_as_u32(seedf());
+  b:#f64 = std::bits::u64_as_f64(std::bits::f64_as_u64(seedd()));
+  (#i32)a + (#i32)b
+}

@@ -3,16 +3,20 @@
 #include "codegen.h"
 #include "constants.h"
 #include "function_key.h"
+#include "sdcccall.h"
 #include "semantics.h"
 #include "common.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <queue>
+#include <set>
 #include <sstream>
 #include <optional>
 #include <unordered_map>
@@ -43,45 +47,11 @@ static bool has_annotation(const std::vector<Annotation>& anns, const std::strin
 }
 
 static std::optional<int> sdcccall_mode_for_function_decl(const StmtPtr& decl) {
-    if (!decl || decl->kind != Stmt::Kind::FuncDecl) return std::nullopt;
-
-    std::optional<int> mode;
-    for (const auto& ann : decl->annotations) {
-        if (ann.name != "sdcccall") continue;
-
-        if (!decl->is_external && !decl->is_exported) {
-            throw CompileError("Megalinker backend: [[sdcccall]] is only valid on ABI-visible functions (&! and &^)",
-                               ann.location);
-        }
-        if (ann.args.size() != 1) {
-            throw CompileError("Megalinker backend: [[sdcccall]] requires exactly one argument (0 or 1)",
-                               ann.location);
-        }
-
-        const std::string& arg = ann.args[0];
-        int parsed = -1;
-        if (arg == "0") {
-            parsed = 0;
-        } else if (arg == "1") {
-            parsed = 1;
-        } else {
-            throw CompileError("Megalinker backend: [[sdcccall]] argument must be 0 or 1",
-                               ann.location);
-        }
-
-        if (mode && *mode != parsed) {
-            throw CompileError("Megalinker backend: conflicting [[sdcccall]] annotations on the same function",
-                               ann.location);
-        }
-        mode = parsed;
-    }
-    return mode;
+    return megalinker_sdcccall::mode_for_function_decl(decl, true, "Megalinker backend");
 }
 
 static std::string sdcccall_suffix_for_function_decl(const StmtPtr& decl) {
-    std::optional<int> mode = sdcccall_mode_for_function_decl(decl);
-    if (!mode.has_value()) return "";
-    return " __sdcccall(" + std::to_string(*mode) + ")";
+    return megalinker_sdcccall::suffix_for_function_decl(decl, true, "Megalinker backend");
 }
 
 static bool contains_named_struct_type(TypePtr type) {
@@ -550,102 +520,6 @@ struct GlobalInfo {
     int scope_id = -1;
 };
 
-static bool expr_uses_rom_symbol(ExprPtr expr,
-                                 const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 const AnalyzedProgram& analyzed,
-                                 int instance_id,
-                                 int entry_instance_id);
-
-static bool stmt_uses_rom_symbol(StmtPtr stmt,
-                                 const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 const AnalyzedProgram& analyzed,
-                                 int instance_id,
-                                 int entry_instance_id) {
-    if (!stmt) return false;
-    switch (stmt->kind) {
-        case Stmt::Kind::Expr:
-            return expr_uses_rom_symbol(stmt->expr, globals, analyzed, instance_id, entry_instance_id);
-        case Stmt::Kind::Return:
-            return expr_uses_rom_symbol(stmt->return_expr, globals, analyzed, instance_id, entry_instance_id);
-        case Stmt::Kind::VarDecl:
-            return expr_uses_rom_symbol(stmt->var_init, globals, analyzed, instance_id, entry_instance_id);
-        case Stmt::Kind::ConditionalStmt:
-            if (expr_uses_rom_symbol(stmt->condition, globals, analyzed, instance_id, entry_instance_id)) return true;
-            return stmt_uses_rom_symbol(stmt->true_stmt, globals, analyzed, instance_id, entry_instance_id);
-        default:
-            return false;
-    }
-}
-
-static bool expr_uses_rom_symbol(ExprPtr expr,
-                                 const std::unordered_map<std::string, GlobalInfo>& globals,
-                                 const AnalyzedProgram& analyzed,
-                                 int instance_id,
-                                 int entry_instance_id) {
-    if (!expr) return false;
-    switch (expr->kind) {
-        case Expr::Kind::Identifier: {
-            Symbol* sym = analyzed.binding_for ? analyzed.binding_for(instance_id, expr.get()) : nullptr;
-            if (!sym) return false;
-            std::string key = symbol_key_for(sym, entry_instance_id);
-            auto it = globals.find(key);
-            return it != globals.end() && it->second.is_rom;
-        }
-        case Expr::Kind::Call:
-            for (const auto& rec : expr->receivers) {
-                if (expr_uses_rom_symbol(rec, globals, analyzed, instance_id, entry_instance_id)) return true;
-            }
-            for (const auto& arg : expr->args) {
-                if (expr_uses_rom_symbol(arg, globals, analyzed, instance_id, entry_instance_id)) return true;
-            }
-            if (expr->operand && expr->operand->kind != Expr::Kind::Identifier) {
-                return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
-            }
-            return false;
-        case Expr::Kind::Binary:
-            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Unary:
-            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Index:
-            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Member:
-            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::ArrayLiteral:
-        case Expr::Kind::TupleLiteral:
-            for (const auto& elem : expr->elements) {
-                if (expr_uses_rom_symbol(elem, globals, analyzed, instance_id, entry_instance_id)) return true;
-            }
-            return false;
-        case Expr::Kind::Block:
-            for (const auto& st : expr->statements) {
-                if (stmt_uses_rom_symbol(st, globals, analyzed, instance_id, entry_instance_id)) return true;
-            }
-            return expr_uses_rom_symbol(expr->result_expr, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Conditional:
-            return expr_uses_rom_symbol(expr->condition, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->true_expr, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->false_expr, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Cast:
-            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Assignment:
-            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Range:
-            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Length:
-            return expr_uses_rom_symbol(expr->operand, globals, analyzed, instance_id, entry_instance_id);
-        case Expr::Kind::Iteration:
-        case Expr::Kind::Repeat:
-            return expr_uses_rom_symbol(expr->left, globals, analyzed, instance_id, entry_instance_id) ||
-                   expr_uses_rom_symbol(expr->right, globals, analyzed, instance_id, entry_instance_id);
-        default:
-            return false;
-    }
-}
-
 struct Variant {
     std::string id;
     std::string func_key;
@@ -660,7 +534,6 @@ struct Variant {
     std::vector<PtrKind> param_kinds;
     std::unordered_map<std::string, PtrKind> param_kind_by_name;
     char page = 'A';
-    bool alters_caller_page = false;
     bool needs_restore = false;
     std::string name;
     std::string c_name;
@@ -677,7 +550,7 @@ static std::string segment_expr(char page, const std::string& module) {
 
 static PtrKind infer_ptr_kind(ExprPtr expr,
                               const Variant& variant,
-                              const std::unordered_map<std::string, GlobalInfo>& globals,
+                              const std::map<std::string, GlobalInfo>& globals,
                               const AnalyzedProgram& analyzed,
                               int entry_instance_id) {
     if (!expr || !expr->type) return PtrKind::Ram;
@@ -788,10 +661,14 @@ static std::string signature_key(const std::string& func_key,
 }
 
 static std::string trampoline_name(const StmtPtr& decl,
+                                   int scope_id,
                                    char reent_key,
                                    const std::string& ref_key,
                                    const std::string& pk) {
     std::string name = qualified_name(decl) + "__tramp";
+    if (scope_id >= 0) {
+        name += "__s" + std::to_string(scope_id);
+    }
     name += (reent_key == 'R') ? "__reent" : "__nonreent";
     if (!ref_key.empty()) {
         bool all_mut = std::all_of(ref_key.begin(), ref_key.end(), [](char c) { return c == 'M'; });
@@ -1152,7 +1029,9 @@ static void print_megalinker_usage(std::ostream& os) {
 
 static void emit_megalinker_backend(const BackendInput& input) {
     const AnalyzedProgram& analyzed = input.program;
-    if (!analyzed.module || !analyzed.analysis || !analyzed.optimization) {
+    if (!analyzed.module || !analyzed.analysis || !analyzed.optimization ||
+        !analyzed.binding_for || !analyzed.resolve_type ||
+        !analyzed.constexpr_condition || !analyzed.lookup_type_symbol) {
         throw CompileError("Megalinker backend requires full analyzed program input",
                            SourceLocation());
     }
@@ -1206,7 +1085,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     };
 
     // Collect globals from the frontend's live symbol set.
-    std::unordered_map<std::string, GlobalInfo> globals;
+    std::map<std::string, GlobalInfo> globals;
     for (const Symbol* sym : analysis.used_global_vars) {
         if (!sym || sym->is_local) continue;
         if (sym->kind != Symbol::Kind::Variable && sym->kind != Symbol::Kind::Constant) continue;
@@ -1243,7 +1122,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     };
 
     // Collect functions from the frontend's reachable set.
-    std::unordered_map<std::string, FunctionInfo> function_map;
+    std::map<std::string, FunctionInfo> function_map;
     for (const Symbol* sym : analysis.reachable_functions) {
         if (!sym || sym->kind != Symbol::Kind::Function || sym->is_external) continue;
         StmtPtr stmt = sym->declaration;
@@ -1579,7 +1458,11 @@ static void emit_megalinker_backend(const BackendInput& input) {
             if (use_trampoline) {
                 auto it = build.trampoline_variants.find(sig_key);
                 if (it == build.trampoline_variants.end()) {
-                    std::string tramp_name = trampoline_name(sym->declaration, desired_reent, desired_ref, pk);
+                    std::string tramp_name = trampoline_name(sym->declaration,
+                                                             f_it->second.scope_id,
+                                                             desired_reent,
+                                                             desired_ref,
+                                                             pk);
                     build.trampoline_names[sig_key] = header_codegen.mangle(tramp_name);
                     std::string tramp_id = add_variant(callee_key, f_it->second, "", desired_reent,
                                                        desired_ref, param_kinds, 'A', true, 0);
@@ -1601,28 +1484,12 @@ static void emit_megalinker_backend(const BackendInput& input) {
         }
     }
 
-    // Determine restore needs per variant
+    // Determine restore needs per variant.
+    // Conservative policy: caller-specialized variants always restore caller page.
     for (const auto& id : build.order) {
         Variant& variant = build.variants[id];
-        bool alters = false;
-        auto ct = build.call_targets.find(id);
-        if (ct != build.call_targets.end() && !ct->second.empty()) {
-            alters = true;
-        }
-        auto co = build.call_overrides.find(id);
-        if (!alters && co != build.call_overrides.end() && !co->second.empty()) {
-            alters = true;
-        }
-        if (!alters && variant.decl && variant.decl->body) {
-            alters = expr_uses_rom_symbol(variant.decl->body, globals, analyzed,
-                                          variant.instance_id, entry_instance_id);
-        }
-        variant.alters_caller_page = alters;
         if (!variant.caller_id.empty()) {
             if (build.variants.find(variant.caller_id) != build.variants.end()) {
-                // Conservative restore: each callee variant is already caller-specialized,
-                // so restoring the caller page is always correct and avoids under-modeling
-                // page changes from backend-specific lowering details.
                 variant.needs_restore = true;
             }
         }
@@ -1680,7 +1547,7 @@ static void emit_megalinker_backend(const BackendInput& input) {
     header_builder << "uint16_t " << strlen_far_b_fn << "(uint32_t ptr);\n";
 
     // Segment declarations for all modules
-    std::unordered_set<std::string> module_names;
+    std::set<std::string> module_names;
     for (const auto& id : build.order) {
         const Variant& variant = build.variants[id];
         if (!variant.emit_definition) continue;
@@ -2003,7 +1870,10 @@ void register_backend_megalinker() {
     backend.validate_options = validate_megalinker_backend_options;
     backend.parse_option = parse_megalinker_option;
     backend.print_usage = print_megalinker_usage;
-    (void)register_backend(backend);
+    if (!register_backend(backend)) {
+        std::fprintf(stderr, "Failed to register backend 'megalinker'\n");
+        std::abort();
+    }
 }
 
 } // namespace vexel

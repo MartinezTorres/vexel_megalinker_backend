@@ -75,6 +75,23 @@ bool fixed_muldiv_meta_supported_codegen(const vexel::TypePtr& type,
     return total_bits == 8 || total_bits == 16 || total_bits == 32;
 }
 
+bool signed_native_int_type_codegen(const vexel::TypePtr& type, uint64_t& bits) {
+    if (!type || type->kind != vexel::Type::Kind::Primitive) return false;
+    if (!vexel::is_signed_int(type->primitive)) return false;
+    bits = type->integer_bits;
+    return bits == 8 || bits == 16 || bits == 32 || bits == 64;
+}
+
+std::string unsigned_c_type_for_signed_bits_codegen(uint64_t bits) {
+    switch (bits) {
+        case 8: return "uint8_t";
+        case 16: return "uint16_t";
+        case 32: return "uint32_t";
+        case 64: return "uint64_t";
+        default: return "";
+    }
+}
+
 std::string pow2_u64_literal_codegen(uint64_t shift) {
     return std::to_string(1ULL << shift) + "ULL";
 }
@@ -465,6 +482,14 @@ std::string CodeGenerator::gen_binary(ExprPtr expr) {
         emit(storage_prefix() + result_type + " " + tmp + ";");
         declared_temps.insert(tmp);
     }
+    uint64_t signed_bits = 0;
+    if ((expr->op == "+" || expr->op == "-" || expr->op == "*") &&
+        signed_native_int_type_codegen(expr->type, signed_bits)) {
+        std::string utype = unsigned_c_type_for_signed_bits_codegen(signed_bits);
+        emit(tmp + " = (" + result_type + ")((" + utype + ")(" + left + ") " + expr->op +
+             " (" + utype + ")(" + right + "));");
+        return tmp;
+    }
     emit(tmp + " = (" + left + " " + expr->op + " " + right + ");");
     return tmp;
 }
@@ -621,6 +646,9 @@ std::string CodeGenerator::gen_inline_call(ExprPtr expr,
         if (abi.lower_aggregates && rec_type && is_aggregate_type(rec_type)) {
             by_ref = true;
         }
+        if (rec_type && rec_type->kind == Type::Kind::Array) {
+            by_ref = false;
+        }
 
         std::string rec_expr;
         {
@@ -682,6 +710,9 @@ std::string CodeGenerator::gen_inline_call(ExprPtr expr,
         }
 
         bool by_ref = abi.lower_aggregates && param.type && is_aggregate_type(param.type);
+        if (param.type && param.type->kind == Type::Kind::Array) {
+            by_ref = false;
+        }
 
         std::string arg_expr;
         {
@@ -747,13 +778,17 @@ std::string CodeGenerator::gen_inline_call(ExprPtr expr,
 
 std::string CodeGenerator::gen_call(ExprPtr expr) {
     // Check if this is a type constructor call
-    if (expr->is_constructor_call &&
-        expr->operand && expr->operand->kind == Expr::Kind::Identifier &&
-        expr->type && expr->type->kind == Type::Kind::Named) {
-
+    if (expr->is_constructor_call && expr->operand && expr->operand->kind == Expr::Kind::Identifier) {
         Symbol* sym = binding_for(expr->operand);
+        StmtPtr type_decl;
+        auto type_it = type_decl_map.find(expr->operand->name);
+        if (type_it != type_decl_map.end()) {
+            type_decl = type_it->second;
+        } else if (sym && sym->kind == Symbol::Kind::Type && sym->declaration) {
+            type_decl = sym->declaration;
+        }
 
-        if (sym && sym->kind == Symbol::Kind::Type && sym->declaration) {
+        if (type_decl) {
             // Generate C struct initialization
             std::string type_name = mangle_name(expr->operand->name);
             std::string result = "((" + type_name + "){";
@@ -761,10 +796,22 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
             // Match arguments to fields by position
             {
                 VoidCallGuard guard(*this, false);
-                for (size_t i = 0; i < expr->args.size() && i < sym->declaration->fields.size(); i++) {
+                for (size_t i = 0; i < expr->args.size() && i < type_decl->fields.size(); i++) {
+                    const auto& field = type_decl->fields[i];
+                    TypePtr field_type = resolve_type(field.type);
                     if (i > 0) result += ", ";
-                    result += "." + mangle_name(sym->declaration->fields[i].name) + " = ";
-                    result += gen_expr(expr->args[i]);
+                    result += "." + mangle_name(field.name) + " = ";
+                    if (field_type && field_type->kind == Type::Kind::Array) {
+                        ExprPtr arg = expr->args[i];
+                        if (!arg || arg->kind != Expr::Kind::ArrayLiteral) {
+                            throw CompileError(
+                                "Megalinker backend requires array constructor arguments to be residualized as array literals",
+                                arg ? arg->location : expr->location);
+                        }
+                        result += gen_array_initializer(arg);
+                    } else {
+                        result += gen_expr(expr->args[i]);
+                    }
                 }
             }
 
@@ -899,9 +946,8 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
             if (target.name_is_mangled) {
                 func_name = target.name;
             } else {
-                func_name = mangle_name(target.name);
+                func_name = mangle_name(target.name) + instance_suffix(sym);
             }
-            func_name += instance_suffix(sym);
         }
     }
 
@@ -956,7 +1002,7 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
         (!is_external && callee_decl && !callee_decl->is_exported && call_reentrancy_key == 'N');
 
     std::vector<bool> param_is_aggregate;
-    if (abi.lower_aggregates && callee_decl) {
+    if (abi.lower_aggregates && callee_decl && !is_external) {
         for (const auto& param : callee_decl->params) {
             if (param.is_expression_param) continue;
             param_is_aggregate.push_back(param.type && is_aggregate_type(param.type));
@@ -973,6 +1019,9 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
             }
             if (abi.lower_aggregates && rec && rec->type && is_aggregate_type(rec->type)) {
                 by_ref = true;
+            }
+            if (rec && rec->type && rec->type->kind == Type::Kind::Array) {
+                by_ref = false;
             }
             if (by_ref) {
                 if (is_addressable_lvalue(rec) && is_mutable_lvalue(rec)) {
@@ -1041,6 +1090,9 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
         {
             VoidCallGuard guard(*this, false);
             arg_expr = gen_expr(expr->args[i]);
+        }
+        if (expr->args[i] && expr->args[i]->type && expr->args[i]->type->kind == Type::Kind::Array) {
+            by_ref = false;
         }
         if (by_ref) {
             if (is_addressable_lvalue(expr->args[i])) {
@@ -1943,6 +1995,45 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
         }
         return result_tmp;
     }
+    uint64_t signed_bits = 0;
+    if ((assign_op == "+=" || assign_op == "-=" || assign_op == "*=") &&
+        signed_native_int_type_codegen(lhs_type, signed_bits)) {
+        std::string lhs_type_str = gen_type(lhs_type);
+        std::string utype = unsigned_c_type_for_signed_bits_codegen(signed_bits);
+        std::string ptr_tmp = fresh_temp();
+        if (!declared_temps.count(ptr_tmp)) {
+            emit(storage_prefix() + lhs_type_str + "* " + ptr_tmp + " = &(" + lhs + ");");
+            declared_temps.insert(ptr_tmp);
+        } else {
+            emit(ptr_tmp + " = &(" + lhs + ");");
+        }
+        std::string lhs_u = fresh_temp();
+        std::string rhs_u = fresh_temp();
+        if (!declared_temps.count(lhs_u)) {
+            emit(storage_prefix() + utype + " " + lhs_u + ";");
+            declared_temps.insert(lhs_u);
+        }
+        if (!declared_temps.count(rhs_u)) {
+            emit(storage_prefix() + utype + " " + rhs_u + ";");
+            declared_temps.insert(rhs_u);
+        }
+        emit(lhs_u + " = (" + utype + ")(*" + ptr_tmp + ");");
+        emit(rhs_u + " = (" + utype + ")(" + rhs + ");");
+        std::string op = assign_op.substr(0, assign_op.size() - 1);
+        emit(lhs_u + " = (" + lhs_u + " " + op + " " + rhs_u + ");");
+        emit("*" + ptr_tmp + " = (" + lhs_type_str + ")" + lhs_u + ";");
+        std::string result_tmp = fresh_temp();
+        if (!declared_temps.count(result_tmp)) {
+            emit(storage_prefix() + lhs_type_str + " " + result_tmp + ";");
+            declared_temps.insert(result_tmp);
+        }
+        emit(result_tmp + " = *" + ptr_tmp + ";");
+        if (rhs.rfind("tmp", 0) == 0 &&
+            (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
+            release_temp(rhs);
+        }
+        return result_tmp;
+    }
     // Release RHS temp if it's a temporary
     if (rhs.rfind("tmp", 0) == 0 &&
         (!expr->right || !expr->right->type || expr->right->type->kind != Type::Kind::Array)) {
@@ -1950,7 +2041,7 @@ std::string CodeGenerator::gen_assignment(ExprPtr expr) {
     }
 
     if (lhs_type && lhs_type->kind == Type::Kind::Array) {
-        emit("memcpy(" + lhs + ", " + rhs + ", sizeof(" + lhs + "));");
+        emit("memmove(" + lhs + ", " + rhs + ", sizeof(" + lhs + "));");
         std::string temp = fresh_temp();
         if (!declared_temps.count(temp)) {
             emit(storage_prefix() + std::string("int ") + temp + " = 0;");

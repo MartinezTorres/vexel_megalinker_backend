@@ -382,12 +382,6 @@ void CodeGenerator::emit_return_stmt(const std::string& expr) {
     }
 }
 
-void CodeGenerator::append_return_prefix(std::ostringstream& out) const {
-    if (!abi.return_prefix.empty()) {
-        out << abi.return_prefix << "\n";
-    }
-}
-
 int64_t CodeGenerator::resolve_array_length(TypePtr type, const SourceLocation& loc) {
     if (!type || type->kind != Type::Kind::Array || !type->array_size) {
         throw CompileError("Cannot determine array length for comparator generation", loc);
