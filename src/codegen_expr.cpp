@@ -492,6 +492,49 @@ std::string CodeGenerator::gen_unary(ExprPtr expr) {
     return tmp;
 }
 
+std::string CodeGenerator::gen_std_bits_builtin_call(const std::string& runtime_name,
+                                                     const std::string& arg_expr,
+                                                     TypePtr result_type,
+                                                     const SourceLocation& loc) {
+    auto ensure_primitive = [&](TypePtr type, const std::string& context) -> TypePtr {
+        if (!type || type->kind != Type::Kind::Primitive) {
+            throw CompileError("Bundled std::bits builtin '" + runtime_name +
+                                   "' requires primitive " + context + " type",
+                               loc);
+        }
+        return type;
+    };
+
+    if (runtime_name == "f32_as_u32" ||
+        runtime_name == "u32_as_f32" ||
+        runtime_name == "f64_as_u64" ||
+        runtime_name == "u64_as_f64") {
+        TypePtr dst = ensure_primitive(result_type, "result");
+        std::string arg_type;
+        if (runtime_name == "f32_as_u32") arg_type = "float";
+        if (runtime_name == "u32_as_f32") arg_type = "uint32_t";
+        if (runtime_name == "f64_as_u64") arg_type = "double";
+        if (runtime_name == "u64_as_f64") arg_type = "uint64_t";
+
+        std::string src_tmp = fresh_temp();
+        if (!declared_temps.count(src_tmp)) {
+            emit(storage_prefix() + arg_type + " " + src_tmp + ";");
+            declared_temps.insert(src_tmp);
+        }
+        emit(src_tmp + " = (" + arg_type + ")(" + arg_expr + ");");
+
+        std::string dst_tmp = fresh_temp();
+        if (!declared_temps.count(dst_tmp)) {
+            emit(storage_prefix() + gen_type(dst) + " " + dst_tmp + ";");
+            declared_temps.insert(dst_tmp);
+        }
+        emit("memcpy(&" + dst_tmp + ", &" + src_tmp + ", sizeof(" + dst_tmp + "));");
+        return dst_tmp;
+    }
+
+    throw CompileError("Unsupported bundled std::bits builtin: " + runtime_name, loc);
+}
+
 std::string CodeGenerator::gen_inline_call(ExprPtr expr,
                                            Symbol* callee_sym,
                                            StmtPtr callee_decl,
@@ -1035,6 +1078,20 @@ std::string CodeGenerator::gen_call(ExprPtr expr) {
         }
         param_idx++;
         agg_idx++;
+    }
+
+    if (is_external && sym && callee_decl && is_bundled_std_bits_function(sym, callee_decl) &&
+        is_std_bits_builtin_name(callee_decl->func_name)) {
+        if (all_args.size() != 1) {
+            throw CompileError("Bundled std::bits builtin '" + callee_decl->func_name +
+                                   "' expects exactly one value argument",
+                               expr->location);
+        }
+        TypePtr result_type = expr->type;
+        if ((!result_type || result_type->kind == Type::Kind::TypeVar) && callee_decl->return_type) {
+            result_type = callee_decl->return_type;
+        }
+        return gen_std_bits_builtin_call(callee_decl->func_name, all_args[0], result_type, expr->location);
     }
 
     std::string out_temp;

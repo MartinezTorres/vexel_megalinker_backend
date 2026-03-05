@@ -61,6 +61,16 @@ bool is_std_math_macro_builtin_name_impl(const std::string& runtime_name) {
     return runtime_name == "isnan" || runtime_name == "isinf" || runtime_name == "isfinite";
 }
 
+bool is_std_bits_builtin_name_impl(const std::string& runtime_name) {
+    static const std::unordered_set<std::string> kNames = {
+        "f32_as_u32",
+        "u32_as_f32",
+        "f64_as_u64",
+        "u64_as_f64",
+    };
+    return kNames.count(runtime_name) > 0;
+}
+
 } // namespace
 
 namespace vexel::megalinker_codegen {
@@ -128,10 +138,6 @@ std::string CodeGenerator::gen_type(TypePtr type) {
             // Simplified: size would need compile-time evaluation
             return elem + "*";
         }
-        case Type::Kind::Vector:
-        case Type::Kind::Matrix:
-            throw CompileError("Internal error: vector/matrix type reached megalinker backend after frontend lowering",
-                               type->location);
 
         case Type::Kind::Named:
             if (type_map.count(type->type_name)) {
@@ -300,6 +306,26 @@ bool CodeGenerator::is_bundled_std_math_function(const Symbol* sym, StmtPtr decl
            (path.size() >= 11 && path.compare(path.size() - 11, 11, "std/math.vx") == 0);
 }
 
+bool CodeGenerator::is_std_bits_builtin_name(const std::string& runtime_name) const {
+    return is_std_bits_builtin_name_impl(runtime_name);
+}
+
+bool CodeGenerator::is_bundled_std_bits_function(const Symbol* sym, StmtPtr decl) const {
+    if (!sym || !decl || !analyzed_program || !analyzed_program->program) {
+        return false;
+    }
+    if (sym->module_id < 0) {
+        return false;
+    }
+    const ModuleInfo* mod = analyzed_program->program->module(sym->module_id);
+    if (!mod || mod->origin != ModuleOrigin::BundledStd) {
+        return false;
+    }
+    const std::string& path = mod->path;
+    return path == "std/bits.vx" ||
+           (path.size() >= 11 && path.compare(path.size() - 11, 11, "std/bits.vx") == 0);
+}
+
 std::string CodeGenerator::load_module_fn(char page) const {
     if (page == 'A') {
         if (!abi.load_module_a_fn.empty()) return abi.load_module_a_fn;
@@ -456,10 +482,6 @@ std::string CodeGenerator::ensure_comparator(TypePtr type) {
             fn << "    return 0;\n";
             break;
         }
-        case Type::Kind::Vector:
-        case Type::Kind::Matrix:
-            throw CompileError("Internal error: vector/matrix type reached megalinker comparator generation after frontend lowering",
-                               type->location);
         case Type::Kind::Named: {
             if (!analyzed_program || !analyzed_program->lookup_type_symbol) {
                 throw CompileError("Internal error: comparator generation without type lookup",

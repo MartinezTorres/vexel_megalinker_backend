@@ -276,6 +276,12 @@ private:
     std::string external_link_name(const std::string& qualified_name, const std::string& fallback_c_name) const;
     bool is_std_math_macro_builtin_name(const std::string& runtime_name) const;
     bool is_bundled_std_math_function(const Symbol* sym, StmtPtr decl) const;
+    bool is_std_bits_builtin_name(const std::string& runtime_name) const;
+    bool is_bundled_std_bits_function(const Symbol* sym, StmtPtr decl) const;
+    std::string gen_std_bits_builtin_call(const std::string& runtime_name,
+                                          const std::string& arg_expr,
+                                          TypePtr result_type,
+                                          const SourceLocation& loc);
     std::string ensure_comparator(TypePtr type);
     int64_t resolve_array_length(TypePtr type, const SourceLocation& loc);
     void emit_return_stmt(const std::string& expr);

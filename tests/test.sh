@@ -998,6 +998,56 @@ if rg -q "double sqrt\\(" mathovr.h; then
   exit 1
 fi
 
+cat > "$SCRIPT_DIR/bundled_std_bits_reinterpret.vx" <<'EOF'
+::std::bits;
+&!seedf() -> #f32;
+&!seedd() -> #f64;
+&^main() -> #i32 {
+  a:#u32 = std::bits::f32_as_u32(seedf());
+  b:#f64 = std::bits::u64_as_f64(std::bits::f64_as_u64(seedd()));
+  (#i32)a + (#i32)b
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o bitsrt "$SCRIPT_DIR/bundled_std_bits_reinterpret.vx" \
+  >/tmp/megalinker_bits_reinterpret.out 2>/tmp/megalinker_bits_reinterpret.err; then
+  cat /tmp/megalinker_bits_reinterpret.out /tmp/megalinker_bits_reinterpret.err
+  echo "bundled std::bits reinterpret case failed to compile"
+  exit 1
+fi
+if ! rg -q "memcpy\\(" bitsrt__runtime.c megalinker/*.c; then
+  echo "bundled std::bits reinterpretation should lower through memcpy bitcast path"
+  exit 1
+fi
+if rg -q "vx_f32_as_u32\\(" bitsrt.h bitsrt__runtime.c megalinker/*.c; then
+  echo "bundled std::bits reinterpretation should not emit mangled vx_f32_as_u32 symbol"
+  exit 1
+fi
+
+cat > "$SCRIPT_DIR/std/bits.vx" <<'EOF'
+&!f32_as_u32(x:#f32) -> #u32;
+EOF
+
+cat > "$SCRIPT_DIR/local_std_bits_override.vx" <<'EOF'
+::std::bits;
+&!seedf() -> #f32;
+&^main() -> #i32 {
+  x:#u32 = std::bits::f32_as_u32(seedf());
+  (#i32)x
+}
+EOF
+
+if ! "$ROOT/build/vexel" -b megalinker -o bitsovr "$SCRIPT_DIR/local_std_bits_override.vx" \
+  >/tmp/megalinker_bits_override.out 2>/tmp/megalinker_bits_override.err; then
+  cat /tmp/megalinker_bits_override.out /tmp/megalinker_bits_override.err
+  echo "local std::bits override case failed to compile"
+  exit 1
+fi
+if ! rg -q "vx_f32_as_u32\\(" bitsovr.h bitsovr__runtime.c megalinker/*.c; then
+  echo "local std::bits override should use mangled vx_f32_as_u32 symbol"
+  exit 1
+fi
+
 cat > "$SCRIPT_DIR/bad_width.vx" <<'EOF'
 &!seed() -> #u8;
 &^main() -> #i32 {

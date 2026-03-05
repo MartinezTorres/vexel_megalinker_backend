@@ -573,11 +573,18 @@ void CodeGenerator::gen_module(const Module& mod) {
                 Symbol* ext_sym = binding_for(stmt);
                 std::string qualified_name = (ext_sym && !ext_sym->name.empty()) ? ext_sym->name : func_name;
                 bool bundled_std_math = is_bundled_std_math_function(ext_sym, stmt);
+                bool bundled_std_bits = is_bundled_std_bits_function(ext_sym, stmt);
                 if (bundled_std_math) {
                     qualified_name = "std::math::" + stmt->func_name;
                 }
+                if (bundled_std_bits) {
+                    qualified_name = "std::bits::" + stmt->func_name;
+                }
                 std::string c_name = external_link_name(qualified_name, mangle_name(func_name));
                 if (bundled_std_math && is_std_math_macro_builtin_name(c_name)) {
+                    continue;
+                }
+                if (bundled_std_bits && is_std_bits_builtin_name(stmt->func_name)) {
                     continue;
                 }
                 bool is_nonreentrant = std::any_of(stmt->annotations.begin(), stmt->annotations.end(),
